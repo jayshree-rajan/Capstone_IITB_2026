@@ -26,19 +26,78 @@ CACHE_DIR = Path(__file__).parent.parent / "data" / "edgar_cache"
 # SEC requires a descriptive User-Agent with contact info
 USER_AGENT = "AnalystDesk IITBombay contact@example.com"
 
-# Revenue concept differs by company — Microsoft adopted ASC 606 in FY2018
-# so they report under a different concept name than Alphabet
+# Revenue concept names differ by company. Most post-ASC-606 companies use
+# RevenueFromContractWithCustomerExcludingAssessedTax; older or bank filings
+# use Revenues. We try each in order and take the first hit.
+# Banks (JPM, GS, BAC, MS, WFC) report net revenues differently — we use
+# "Revenues" which maps to their total net revenue line in XBRL.
 REVENUE_CONCEPTS = {
+    # ── Technology ──────────────────────────────────────────────────────────
     "0000789019": [                                         # Microsoft
         "RevenueFromContractWithCustomerExcludingAssessedTax",
-        "Revenues",                                         # fallback for older filings
+        "Revenues",
     ],
     "0001652044": [                                         # Alphabet
         "Revenues",
         "RevenueFromContractWithCustomerExcludingAssessedTax",
     ],
+    "0000320193": [                                         # Apple
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+    ],
+    "0001018724": [                                         # Amazon
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "SalesRevenueNet",
+        "Revenues",
+    ],
+    "0001326801": [                                         # Meta
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+    ],
+    "0001045810": [                                         # NVIDIA
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+    ],
+    "0000002488": [                                         # AMD
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "NetRevenue",
+        "Revenues",
+    ],
+    "0001341439": [                                         # Oracle
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+    ],
+    # ── Finance ─────────────────────────────────────────────────────────────
+    "0000019617": [                                         # JPMorgan Chase
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+    ],
+    "0000886982": [                                         # Goldman Sachs
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+    ],
+    "0000070858": [                                         # Bank of America
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+    ],
+    "0001403161": [                                         # Visa
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+    ],
+    "0000895421": [                                         # Morgan Stanley
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+    ],
+    "0001141391": [                                         # Mastercard
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "Revenues",
+    ],
+    "0000072971": [                                         # Wells Fargo
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+    ],
 }
-OPERATING_INCOME_CONCEPT = "OperatingIncomeLoss"            # same for both
+OPERATING_INCOME_CONCEPT = "OperatingIncomeLoss"
 
 
 def _pad_cik(cik: str) -> str:

@@ -30,14 +30,14 @@ from plotly.subplots import make_subplots
 
 from analystdesk.baseline import run_baseline
 from analystdesk.ingest import ingest_all, load_passages, PASSAGES_DIR
-from analystdesk.scope import COMPANIES, create_request
+from analystdesk.scope import COMPANIES, C0_COMPANIES, create_request
 
 VENV_PYTHON = "/Users/25.jayshree/Documents/Jayshree.agentic/.venv/bin/python"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _get_baseline_data(years=(2022, 2023, 2024)):
-    request = create_request(["Microsoft", "Alphabet"], list(years))
+    request = create_request([c.name for c in C0_COMPANIES], list(years))
     note = run_baseline(request)
     return note
 
@@ -153,7 +153,8 @@ def load_dashboard():
 
     stats_md = (
         f"| Metric | Value |\n|--------|-------|\n"
-        f"| Companies | {len(COMPANIES)} (Microsoft, Alphabet) |\n"
+        f"| Companies in scope | {len(COMPANIES)} (8 Tech + 7 Finance) |\n"
+        f"| C0 baseline pair | Microsoft vs Alphabet |\n"
         f"| Fiscal Years | 2022 · 2023 · 2024 |\n"
         f"| EDGAR Verified | {note.verification_pct()}% |\n"
         f"| 10-K Documents Indexed | {n_files} |\n"
@@ -275,7 +276,7 @@ def search_passages(query, company_filter, year_filter):
 with gr.Blocks(title="Analyst Desk") as demo:
     gr.Markdown(
         "# 📊 Analyst Desk\n"
-        "**Microsoft vs Alphabet** · SEC EDGAR XBRL · C0 Fixed RAG Pipeline · "
+        "**15 companies · Tech + Finance · SEC EDGAR XBRL · C0 Fixed RAG Pipeline** · "
         "IIT Bombay Agentic AI Capstone"
     )
 

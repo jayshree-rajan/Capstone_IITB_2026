@@ -6,6 +6,22 @@
 
 ---
 
+## Company Scope
+
+**PDF requirement:** 10–15 companies in two sectors over three fiscal years.
+
+| Sector | Companies (8) | Tickers |
+|--------|--------------|---------|
+| Technology | Microsoft, Alphabet, Apple, Amazon, Meta, NVIDIA, AMD, Oracle | MSFT, GOOGL, AAPL, AMZN, META, NVDA, AMD, ORCL |
+| Finance | JPMorgan Chase, Goldman Sachs, Bank of America, Visa, Morgan Stanley, Mastercard, Wells Fargo | JPM, GS, BAC, V, MS, MA, WFC |
+
+**Total:** 15 companies × 3 fiscal years (2022, 2023, 2024) = **45 company-years**
+
+**C0 baseline pair:** Microsoft + Alphabet (fixed, as per PDF example request)
+**C1/C2 scope:** All 15 companies, both sectors, dynamic company selection
+
+---
+
 ## Phase 0 — Foundation ✅ DONE
 
 **Lecture:** Pre-L4

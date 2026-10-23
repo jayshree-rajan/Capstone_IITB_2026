@@ -103,15 +103,22 @@ class HybridRetriever:
 
         # Vector search — semantic similarity
         q_emb = self.embedder.encode([query], show_progress_bar=False).tolist()
-        where = {}
+        # Chroma requires $and when combining multiple filter keys
+        filters = []
         if company:
-            where["company"] = company
+            filters.append({"company": {"$eq": company}})
         if year:
-            where["fiscal_year"] = str(year)
+            filters.append({"fiscal_year": {"$eq": str(year)}})
+        if len(filters) == 1:
+            where = filters[0]
+        elif len(filters) > 1:
+            where = {"$and": filters}
+        else:
+            where = None
         vec_results = self.collection.query(
             query_embeddings=q_emb,
             n_results=n_candidates,
-            where=where if where else None,
+            where=where,
         )
         vec_pids = vec_results["ids"][0] if vec_results["ids"] else []
 

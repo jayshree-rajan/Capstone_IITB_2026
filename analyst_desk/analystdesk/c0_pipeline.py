@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 from .edgar import get_financials
-from .scope import COMPANIES
+from .scope import COMPANIES, C0_COMPANIES
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 C0_MODEL = os.getenv("C0_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct:free")
@@ -97,8 +97,8 @@ def answer(
     # Step 1 — fixed retrieval (no agent decides what to retrieve)
     hits = retriever.search(question, top_k=top_k)
 
-    # Step 2 — fixed EDGAR fetch for all companies and years in scope
-    numbers_text = _format_numbers(["MSFT", "GOOGL"], years)
+    # Step 2 — fixed EDGAR fetch for C0 pair (MSFT + GOOGL)
+    numbers_text = _format_numbers([c.ticker for c in C0_COMPANIES], years)
 
     # Step 3 — fill fixed prompt template
     user_content = ANSWER_TEMPLATE.format(
