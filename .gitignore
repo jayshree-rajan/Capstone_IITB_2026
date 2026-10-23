@@ -16,6 +16,16 @@ __pycache__/
 outputs/
 logs/
 
+# Large generated data — regenerate locally with `python -m analystdesk --mode ingest`
+analyst_desk/data/edgar_cache/
+analyst_desk/data/passages/
+analyst_desk/data/index/
+analyst_desk/data/10k/
+jayshree/analyst_desk/data/edgar_cache/
+jayshree/analyst_desk/data/passages/
+jayshree/analyst_desk/data/index/
+jayshree/analyst_desk/data/10k/
+
 # Notebook checkpoints
 .ipynb_checkpoints/
 

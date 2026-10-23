@@ -178,6 +178,103 @@ def get_annual_fact(cik: str, concept: str, fiscal_year: int) -> dict | None:
     }
 
 
+def get_quarterly_facts(cik: str, concept: str, fiscal_year: int) -> list[dict]:
+    """Return Q1-Q4 values for one XBRL concept within a fiscal year.
+
+    Uses the annual filing's period end date as an anchor, then finds all
+    quarterly (10-Q) entries whose end date falls in the preceding 12 months.
+    This handles both December fiscal year ends (GOOGL) and June ends (MSFT).
+
+    Returns a list of dicts sorted by period end date, one entry per quarter.
+    Duplicate amended filings are deduplicated — latest filed wins.
+    """
+    from datetime import date
+
+    annual = get_annual_fact(cik, concept, fiscal_year)
+    if annual is None:
+        return []
+
+    annual_end = date.fromisoformat(annual["end"])
+    # 12-month window ending on the annual period end date
+    window_start = annual_end.replace(year=annual_end.year - 1)
+
+    facts = fetch_company_facts(cik)
+    entries = (
+        facts.get("facts", {})
+             .get("us-gaap", {})
+             .get(concept, {})
+             .get("units", {})
+             .get("USD", [])
+    )
+
+    quarters: list[dict] = []
+    for e in entries:
+        if e.get("fp") not in ("Q1", "Q2", "Q3", "Q4"):
+            continue
+        if e.get("form") not in ("10-Q", "10-Q/A"):
+            continue
+        try:
+            end_date = date.fromisoformat(e["end"])
+        except (KeyError, ValueError):
+            continue
+        if window_start < end_date <= annual_end:
+            quarters.append({
+                "quarter": e["fp"],
+                "val": e["val"],
+                "end": e["end"],
+                "accn": e["accn"],
+                "filed": e.get("filed", ""),
+                "fact_id": f"{concept}/{e['fp']}/{e['accn']}",
+            })
+
+    # Keep latest filed per quarter (handles 10-Q/A amendments)
+    best: dict[str, dict] = {}
+    for q in quarters:
+        key = q["quarter"]
+        if key not in best or q["filed"] > best[key]["filed"]:
+            best[key] = q
+
+    return sorted(best.values(), key=lambda q: q["end"])
+
+
+def get_quarterly_financials(cik: str, fiscal_year: int) -> list[dict]:
+    """Return quarterly revenue + operating income for one company-year.
+
+    Returns a list of dicts, one per quarter found, each with:
+        quarter          e.g. "Q1"
+        end              period end date
+        revenue          { val, fact_id } | None
+        operating_income { val, fact_id } | None
+    """
+    rev_concept = None
+    rev_quarters: list[dict] = []
+    for concept in REVENUE_CONCEPTS.get(cik, ["Revenues"]):
+        rev_quarters = get_quarterly_facts(cik, concept, fiscal_year)
+        if rev_quarters:
+            rev_concept = concept
+            break
+
+    op_quarters = get_quarterly_facts(cik, OPERATING_INCOME_CONCEPT, fiscal_year)
+
+    # Merge by quarter label
+    rev_by_q = {q["quarter"]: q for q in rev_quarters}
+    op_by_q  = {q["quarter"]: q for q in op_quarters}
+    all_quarters = sorted(set(rev_by_q) | set(op_by_q))
+
+    result = []
+    for qtr in all_quarters:
+        rev = rev_by_q.get(qtr)
+        op  = op_by_q.get(qtr)
+        result.append({
+            "quarter": qtr,
+            "end": (rev or op)["end"],
+            "revenue":          {"val": rev["val"], "fact_id": rev["fact_id"]} if rev else None,
+            "operating_income": {"val": op["val"],  "fact_id": op["fact_id"]} if op else None,
+        })
+
+    return result
+
+
 def get_financials(cik: str, fiscal_year: int) -> dict:
     """Return revenue and operating_income for one company-year.
 

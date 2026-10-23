@@ -29,6 +29,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from analystdesk.baseline import run_baseline
+from analystdesk.edgar import get_quarterly_financials
 from analystdesk.ingest import ingest_all, load_passages, PASSAGES_DIR
 from analystdesk.scope import COMPANIES, C0_COMPANIES, create_request
 
@@ -137,6 +138,64 @@ def build_income_chart(note):
     return fig
 
 
+_CHART_KEYWORDS = {"chart", "plot", "graph", "visuali", "trend", "quarterly", "quarter"}
+
+def _wants_chart(question: str) -> bool:
+    q = question.lower()
+    return any(kw in q for kw in _CHART_KEYWORDS)
+
+
+def build_chat_chart(years: list[int]) -> go.Figure | None:
+    """Generate a quarterly revenue + margin chart for MSFT and GOOGL."""
+    company_map = {c.ticker: c for c in COMPANIES}
+    series: dict[str, dict] = {}
+
+    for ticker in ("MSFT", "GOOGL"):
+        company = company_map[ticker]
+        quarters_x, rev_y, margin_y = [], [], []
+        for year in years:
+            qtrs = get_quarterly_financials(company.cik, year)
+            for q in qtrs:
+                label = f"FY{year} {q['quarter']}"
+                quarters_x.append(label)
+                rev = q["revenue"]
+                op  = q["operating_income"]
+                rev_y.append(round(rev["val"] / 1_000_000, 1) if rev else None)
+                if rev and op and rev["val"]:
+                    margin_y.append(round(op["val"] / rev["val"] * 100, 1))
+                else:
+                    margin_y.append(None)
+        series[ticker] = {"x": quarters_x, "rev": rev_y, "margin": margin_y}
+
+    if not any(series[t]["x"] for t in series):
+        return None
+
+    colors = {"MSFT": "#0078D4", "GOOGL": "#34A853"}
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        subplot_titles=("Quarterly Revenue (USD Millions)", "Quarterly Operating Margin (%)"),
+        vertical_spacing=0.12,
+    )
+    for ticker, s in series.items():
+        fig.add_trace(go.Bar(
+            name=f"{ticker} Revenue", x=s["x"], y=s["rev"],
+            marker_color=colors[ticker], opacity=0.85, legendgroup=ticker,
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            name=f"{ticker} Margin", x=s["x"], y=s["margin"],
+            mode="lines+markers", line=dict(color=colors[ticker], width=2),
+            marker=dict(size=7), legendgroup=ticker, showlegend=False,
+        ), row=2, col=1)
+
+    fig.update_layout(
+        height=520, barmode="group",
+        legend=dict(orientation="h", y=1.08),
+        margin=dict(t=80, b=40),
+        title_text="MSFT vs GOOGL — Quarterly Profitability (EDGAR XBRL verified)",
+    )
+    return fig
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 def load_dashboard():
@@ -202,7 +261,7 @@ def run_ingestion():
 
 def chat_fn(message, history, years_str):
     if not message.strip():
-        yield history, "", []
+        yield history, "", [], None
         return
 
     # Parse years
@@ -216,7 +275,7 @@ def chat_fn(message, history, years_str):
     history = list(history or [])
     history.append({"role": "user", "content": message})
     history.append({"role": "assistant", "content": "⏳ Thinking..."})
-    yield history, "", []
+    yield history, "", [], None
 
     n_files, n_passages = _passage_stats()
     if n_passages == 0:
@@ -224,7 +283,7 @@ def chat_fn(message, history, years_str):
             "⚠️ No passages indexed yet. Please click **Run Ingestion** "
             "in the Dashboard tab first."
         )
-        yield history, "", []
+        yield history, "", [], None
         return
 
     try:
@@ -235,6 +294,9 @@ def chat_fn(message, history, years_str):
         ans = result["answer"]
         hits = result["passages"]
 
+        # Generate chart if user asked for one
+        chart = build_chat_chart(years) if _wants_chart(message) else None
+
         # Format citations
         cite_rows = [[
             h["passage_id"], h["company"],
@@ -244,11 +306,11 @@ def chat_fn(message, history, years_str):
         ] for h in hits]
 
         history[-1]["content"] = ans
-        yield history, "", cite_rows
+        yield history, "", cite_rows, chart
 
     except Exception as e:
         history[-1]["content"] = f"❌ Error: {e}"
-        yield history, "", []
+        yield history, "", [], None
 
 
 def search_passages(query, company_filter, year_filter):
@@ -335,6 +397,8 @@ with gr.Blocks(title="Analyst Desk") as demo:
             inputs=chat_input,
         )
 
+        chat_chart = gr.Plot(label="Chart (auto-generated from EDGAR data)", visible=True)
+
         citations_table = gr.Dataframe(
             headers=["passage_id", "company", "year", "section", "score", "text preview"],
             label="Retrieved passages (citations)",
@@ -394,12 +458,12 @@ with gr.Blocks(title="Analyst Desk") as demo:
     send_btn.click(
         fn=chat_fn,
         inputs=[chat_input, chatbot, years_input],
-        outputs=[chatbot, chat_input, citations_table],
+        outputs=[chatbot, chat_input, citations_table, chat_chart],
     )
     chat_input.submit(
         fn=chat_fn,
         inputs=[chat_input, chatbot, years_input],
-        outputs=[chatbot, chat_input, citations_table],
+        outputs=[chatbot, chat_input, citations_table, chat_chart],
     )
 
     search_btn.click(

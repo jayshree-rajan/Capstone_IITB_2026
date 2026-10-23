@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .edgar import get_financials
+from .edgar import get_financials, get_quarterly_financials
 from .scope import COMPANIES, C0_COMPANIES
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -65,23 +65,39 @@ def _format_numbers(companies_in_query: list[str], years: list[int]) -> str:
         if not company:
             continue
         for year in years:
+            # Annual totals
             data = get_financials(company.cik, year)
             rev = data["revenue"]
             op = data["operating_income"]
             if rev:
                 rev_m = round(rev["val"] / 1_000_000, 1)
                 lines.append(
-                    f"{ticker} FY{year} Revenue: ${rev_m:,.1f}M "
+                    f"{ticker} FY{year} Annual Revenue: ${rev_m:,.1f}M "
                     f"[fact_id: {rev['fact_id']}]"
                 )
             if op:
                 op_m = round(op["val"] / 1_000_000, 1)
                 margin = round(op_m / (rev["val"] / 1_000_000) * 100, 2) if rev else None
                 lines.append(
-                    f"{ticker} FY{year} Operating Income: ${op_m:,.1f}M"
+                    f"{ticker} FY{year} Annual Operating Income: ${op_m:,.1f}M"
                     + (f" → Margin: {margin}%" if margin else "")
                     + f" [fact_id: {op['fact_id']}]"
                 )
+            # Quarterly breakdown
+            qtrs = get_quarterly_financials(company.cik, year)
+            for q in qtrs:
+                qrev = q["revenue"]
+                qop  = q["operating_income"]
+                qrev_str = f"Revenue ${round(qrev['val']/1_000_000,1):,.1f}M [fact_id: {qrev['fact_id']}]" if qrev else "Revenue N/A"
+                if qop:
+                    qop_m = round(qop["val"] / 1_000_000, 1)
+                    qmargin = round(qop_m / (qrev["val"] / 1_000_000) * 100, 2) if qrev else None
+                    qop_str = (f"Op.Income ${qop_m:,.1f}M"
+                               + (f" ({qmargin}% margin)" if qmargin else "")
+                               + f" [fact_id: {qop['fact_id']}]")
+                else:
+                    qop_str = "Op.Income N/A"
+                lines.append(f"  {ticker} FY{year} {q['quarter']} (ends {q['end']}): {qrev_str} | {qop_str}")
     return "\n".join(lines) if lines else "(no EDGAR numbers fetched)"
 
 
