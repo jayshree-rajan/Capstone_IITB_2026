@@ -1,124 +1,417 @@
-"""Analyst Desk — C0 Baseline Demo UI.
+"""Analyst Desk — Interactive UI with Dashboard + Chat.
 
 Run with:
     /Users/25.jayshree/Documents/Jayshree.agentic/.venv/bin/python app.py
 
 Opens at http://127.0.0.1:7861
+
+Layout:
+  Tab 1 — Dashboard   : financial metrics charts + data stats
+  Tab 2 — Chat        : ask research questions, get cited answers
+  Tab 3 — Data Explorer: browse passages and search the index
+  Tab 4 — Raw Data    : baseline JSON output
 """
 
+from __future__ import annotations
+
+import json
+import os
 import sys
 from pathlib import Path
 
-# Make the analystdesk package importable when running from this folder
 sys.path.insert(0, str(Path(__file__).parent))
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent / ".env")
+
 import gradio as gr
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from analystdesk.baseline import run_baseline
-from analystdesk.scope import ScopeError, create_request
+from analystdesk.ingest import ingest_all, load_passages, PASSAGES_DIR
+from analystdesk.scope import COMPANIES, create_request
+
+VENV_PYTHON = "/Users/25.jayshree/Documents/Jayshree.agentic/.venv/bin/python"
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _get_baseline_data(years=(2022, 2023, 2024)):
+    request = create_request(["Microsoft", "Alphabet"], list(years))
+    note = run_baseline(request)
+    return note
 
 
-def run(year1: int, year2: int, year3: int):
-    years = sorted({int(year1), int(year2), int(year3)})
-    if len(years) != 3:
-        return [], [], "❌ Please select three different fiscal years.", ""
+def _passage_stats():
+    files = list(PASSAGES_DIR.glob("*.jsonl"))
+    total = sum(
+        sum(1 for l in f.read_text().splitlines() if l.strip())
+        for f in files
+    )
+    return len(files), total
 
+
+# ── dashboard charts ──────────────────────────────────────────────────────────
+
+def build_revenue_chart(note):
+    msft = [r for r in note.rows if r.company == "Microsoft"]
+    googl = [r for r in note.rows if r.company == "Alphabet"]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Microsoft", x=[r.fiscal_year for r in msft],
+        y=[r.revenue_usd_m for r in msft],
+        marker_color="#0078D4", text=[f"${r.revenue_usd_m/1000:.1f}B" for r in msft],
+        textposition="outside",
+    ))
+    fig.add_trace(go.Bar(
+        name="Alphabet", x=[r.fiscal_year for r in googl],
+        y=[r.revenue_usd_m for r in googl],
+        marker_color="#34A853", text=[f"${r.revenue_usd_m/1000:.1f}B" for r in googl],
+        textposition="outside",
+    ))
+    fig.update_layout(
+        title="Revenue (USD Millions) — EDGAR XBRL Verified",
+        barmode="group", xaxis_title="Fiscal Year", yaxis_title="USD Millions",
+        legend=dict(orientation="h", y=1.1), height=380,
+        margin=dict(t=60, b=40),
+    )
+    return fig
+
+
+def build_margin_chart(note):
+    msft = [r for r in note.rows if r.company == "Microsoft"]
+    googl = [r for r in note.rows if r.company == "Alphabet"]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        name="Microsoft", x=[r.fiscal_year for r in msft],
+        y=[r.operating_margin_pct for r in msft],
+        mode="lines+markers+text",
+        text=[f"{r.operating_margin_pct:.1f}%" for r in msft],
+        textposition="top center",
+        line=dict(color="#0078D4", width=3), marker=dict(size=10),
+    ))
+    fig.add_trace(go.Scatter(
+        name="Alphabet", x=[r.fiscal_year for r in googl],
+        y=[r.operating_margin_pct for r in googl],
+        mode="lines+markers+text",
+        text=[f"{r.operating_margin_pct:.1f}%" for r in googl],
+        textposition="bottom center",
+        line=dict(color="#34A853", width=3), marker=dict(size=10),
+    ))
+    fig.update_layout(
+        title="Operating Margin (%) — Computed in Code from EDGAR Numbers",
+        xaxis_title="Fiscal Year", yaxis_title="Operating Margin %",
+        legend=dict(orientation="h", y=1.1), height=380,
+        margin=dict(t=60, b=40),
+    )
+    return fig
+
+
+def build_income_chart(note):
+    msft = [r for r in note.rows if r.company == "Microsoft"]
+    googl = [r for r in note.rows if r.company == "Alphabet"]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        name="Microsoft", x=[r.fiscal_year for r in msft],
+        y=[r.operating_income_usd_m for r in msft],
+        mode="lines+markers",
+        fill="tozeroy", fillcolor="rgba(0,120,212,0.1)",
+        line=dict(color="#0078D4", width=2),
+    ))
+    fig.add_trace(go.Scatter(
+        name="Alphabet", x=[r.fiscal_year for r in googl],
+        y=[r.operating_income_usd_m for r in googl],
+        mode="lines+markers",
+        fill="tozeroy", fillcolor="rgba(52,168,83,0.1)",
+        line=dict(color="#34A853", width=2),
+    ))
+    fig.update_layout(
+        title="Operating Income (USD Millions)",
+        xaxis_title="Fiscal Year", yaxis_title="USD Millions",
+        legend=dict(orientation="h", y=1.1), height=380,
+        margin=dict(t=60, b=40),
+    )
+    return fig
+
+
+# ── UI ────────────────────────────────────────────────────────────────────────
+
+def load_dashboard():
+    note = _get_baseline_data()
+    n_files, n_passages = _passage_stats()
+
+    rows = [[
+        r.company, r.fiscal_year, r.period_end,
+        f"${r.revenue_usd_m:,.1f}M",
+        f"${r.operating_income_usd_m:,.1f}M",
+        f"{r.operating_margin_pct:.1f}%",
+        "✅" if r.revenue_fact_id else "❌",
+    ] for r in note.rows]
+
+    stats_md = (
+        f"| Metric | Value |\n|--------|-------|\n"
+        f"| Companies | {len(COMPANIES)} (Microsoft, Alphabet) |\n"
+        f"| Fiscal Years | 2022 · 2023 · 2024 |\n"
+        f"| EDGAR Verified | {note.verification_pct()}% |\n"
+        f"| 10-K Documents Indexed | {n_files} |\n"
+        f"| Text Passages Indexed | {n_passages if n_passages else '⚠️ Run ingestion first'} |\n"
+        f"| Pipeline | C0 Fixed RAG (no agents) |\n"
+    )
+
+    return (
+        build_revenue_chart(note),
+        build_margin_chart(note),
+        build_income_chart(note),
+        rows,
+        stats_md,
+    )
+
+
+def _try_preload_retriever():
+    """Start loading the retriever in a background thread so the UI launches immediately."""
+    _, n = _passage_stats()
+    if n > 0:
+        import threading
+        def _load():
+            try:
+                from analystdesk.retrieve import get_retriever
+                get_retriever()
+                print(f"✓ Retriever ready ({n} passages)")
+            except Exception as e:
+                print(f"⚠ Could not preload retriever: {e}")
+        threading.Thread(target=_load, daemon=True).start()
+        print(f"⏳ Loading retriever in background ({n} passages)...")
+
+
+def run_ingestion():
+    yield "Starting 10-K ingestion (downloading filings from EDGAR)...\n"
     try:
-        request = create_request(["Microsoft", "Alphabet"], years)
-    except ScopeError as e:
-        return [], [], f"❌ Scope error: {e}", ""
-
-    try:
-        note = run_baseline(request)
+        passages = ingest_all()
+        n_files, n_passages = _passage_stats()
+        from analystdesk.retrieve import reset_retriever, get_retriever
+        reset_retriever()
+        get_retriever(passages)   # build index immediately
+        yield f"✅ Done — {n_files} documents, {n_passages} passages indexed. Chat is ready."
     except Exception as e:
-        return [], [], f"❌ EDGAR fetch failed: {e}", ""
-
-    # Main results table
-    rows = []
-    for r in note.rows:
-        rows.append([
-            r.company,
-            r.fiscal_year,
-            r.period_end,
-            f"${r.revenue_usd_m:,.1f}M" if r.revenue_usd_m else "—",
-            f"${r.operating_income_usd_m:,.1f}M" if r.operating_income_usd_m else "—",
-            f"{r.operating_margin_pct:.1f}%" if r.operating_margin_pct else "—",
-        ])
-
-    # fact_id traceability table
-    fact_rows = []
-    for r in note.rows:
-        if r.revenue_fact_id or r.operating_income_fact_id:
-            fact_rows.append([
-                r.company,
-                r.fiscal_year,
-                r.revenue_fact_id or "—",
-                r.operating_income_fact_id or "—",
-            ])
-
-    # Status summary
-    warnings_text = "\n".join(f"⚠️  {w}" for w in note.warnings) if note.warnings else "✅  No warnings"
-    status = (
-        f"**{note.title}**\n\n"
-        f"Verification: `{note.verification_pct()}%` of rows fully sourced from EDGAR\n\n"
-        f"{warnings_text}\n\n"
-        f"_{note.summary}_"
-    )
-
-    return rows, fact_rows, status, note.to_json()
+        yield f"❌ Ingestion failed: {e}"
 
 
-with gr.Blocks(title="Analyst Desk — C0 Baseline") as demo:
+def chat_fn(message, history, years_str):
+    if not message.strip():
+        yield history, "", []
+        return
+
+    # Parse years
+    try:
+        years = [int(y.strip()) for y in years_str.split(",") if y.strip()]
+        if len(years) != 3:
+            years = [2022, 2023, 2024]
+    except Exception:
+        years = [2022, 2023, 2024]
+
+    history = list(history or [])
+    history.append({"role": "user", "content": message})
+    history.append({"role": "assistant", "content": "⏳ Thinking..."})
+    yield history, "", []
+
+    n_files, n_passages = _passage_stats()
+    if n_passages == 0:
+        history[-1]["content"] = (
+            "⚠️ No passages indexed yet. Please click **Run Ingestion** "
+            "in the Dashboard tab first."
+        )
+        yield history, "", []
+        return
+
+    try:
+        from analystdesk.retrieve import get_retriever
+        from analystdesk.c0_pipeline import answer
+        retriever = get_retriever()
+        result = answer(message, retriever, years=years)
+        ans = result["answer"]
+        hits = result["passages"]
+
+        # Format citations
+        cite_rows = [[
+            h["passage_id"], h["company"],
+            str(h["fiscal_year"]), h.get("item_label", ""),
+            f"{h.get('score', 0):.3f}",
+            h["text"][:200] + "…"
+        ] for h in hits]
+
+        history[-1]["content"] = ans
+        yield history, "", cite_rows
+
+    except Exception as e:
+        history[-1]["content"] = f"❌ Error: {e}"
+        yield history, "", []
+
+
+def search_passages(query, company_filter, year_filter):
+    n_files, n_passages = _passage_stats()
+    if n_passages == 0:
+        return [["—", "—", "—", "—", "⚠️ Run ingestion first"]]
+    try:
+        from analystdesk.retrieve import get_retriever
+        company = company_filter if company_filter != "All" else None
+        year = int(year_filter) if year_filter != "All" else None
+        retriever = get_retriever()
+        hits = retriever.search(query, top_k=8, company=company, year=year)
+        return [[
+            h["passage_id"], h["company"], str(h["fiscal_year"]),
+            h.get("item_label", h["item"]),
+            f"{h.get('score', 0):.3f}",
+            h["text"][:300] + "…"
+        ] for h in hits]
+    except Exception as e:
+        return [["—", "—", "—", "—", str(e), ""]]
+
+
+# ── Gradio app ────────────────────────────────────────────────────────────────
+
+with gr.Blocks(title="Analyst Desk") as demo:
     gr.Markdown(
-        "## Analyst Desk · C0 Baseline\n"
-        "**Microsoft vs Alphabet** — operating margins sourced directly from SEC EDGAR XBRL.\n"
-        "No LLM calls. No agents. Every number is linked to a `fact_id` from the exact SEC filing."
+        "# 📊 Analyst Desk\n"
+        "**Microsoft vs Alphabet** · SEC EDGAR XBRL · C0 Fixed RAG Pipeline · "
+        "IIT Bombay Agentic AI Capstone"
     )
 
-    with gr.Row():
-        y1 = gr.Dropdown([2020, 2021, 2022, 2023, 2024], value=2022, label="Year 1")
-        y2 = gr.Dropdown([2020, 2021, 2022, 2023, 2024], value=2023, label="Year 2")
-        y3 = gr.Dropdown([2020, 2021, 2022, 2023, 2024], value=2024, label="Year 3")
-        run_btn = gr.Button("Run Baseline", variant="primary")
+    # ── Tab 1: Dashboard ──────────────────────────────────────────────────────
+    with gr.Tab("📈 Dashboard"):
+        with gr.Row():
+            refresh_btn = gr.Button("🔄 Refresh", size="sm")
+            ingest_btn = gr.Button("⬇️ Run Ingestion (downloads 10-K filings)", size="sm", variant="primary")
+        ingest_status = gr.Markdown()
 
-    with gr.Tab("Results"):
-        results_table = gr.Dataframe(
-            headers=["Company", "Fiscal Year", "Period End", "Revenue", "Op. Income", "Op. Margin"],
-            column_count=(6, "fixed"),
-            label="Operating Margins (C0 — EDGAR XBRL, no LLM)",
+        stats_md = gr.Markdown()
+
+        with gr.Row():
+            rev_chart = gr.Plot(label="Revenue")
+            margin_chart = gr.Plot(label="Operating Margin")
+
+        income_chart = gr.Plot(label="Operating Income")
+
+        metrics_table = gr.Dataframe(
+            headers=["Company", "FY", "Period End", "Revenue", "Op. Income", "Margin", "Verified"],
+            label="All Metrics (EDGAR XBRL verified)",
             wrap=True,
         )
-        status_box = gr.Markdown()
 
-    with gr.Tab("Fact IDs (Traceability)"):
+    # ── Tab 2: Chat ───────────────────────────────────────────────────────────
+    with gr.Tab("💬 Research Chat"):
         gr.Markdown(
-            "Every number links back to its exact SEC filing via a `fact_id`.\n"
-            "Format: `{concept}/{fiscal_year}/{accession_number}`\n"
-            "The compliance critic (Phase 6) uses these IDs to verify each number with code."
+            "Ask research questions. Answers use **retrieved 10-K passages** + "
+            "**EDGAR verified numbers**. Every claim is cited.\n\n"
+            "Set `OPENROUTER_API_KEY` in your environment to enable LLM answers."
         )
-        fact_table = gr.Dataframe(
-            headers=["Company", "Fiscal Year", "Revenue fact_id", "Op. Income fact_id"],
-            column_count=(4, "fixed"),
-            label="Source citations",
+        with gr.Row():
+            years_input = gr.Textbox(
+                value="2022, 2023, 2024", label="Fiscal Years", scale=1
+            )
+
+        chatbot = gr.Chatbot(
+            height=420, label="Research Assistant",
+            placeholder="Ask about Microsoft and Alphabet financials, risk factors, or MD&A...",
+        )
+        with gr.Row():
+            chat_input = gr.Textbox(
+                placeholder="e.g. What were the main risk factors for Microsoft in 2024?",
+                label="Question", scale=5,
+            )
+            send_btn = gr.Button("Send", variant="primary", scale=1)
+
+        gr.Examples(
+            examples=[
+                ["Compare Microsoft and Alphabet operating margins over 2022–2024"],
+                ["What were Microsoft's main risk factors in FY2024?"],
+                ["How did Alphabet's revenue grow from 2022 to 2024?"],
+                ["What risks did Alphabet highlight related to AI competition?"],
+                ["Compare the MD&A outlook for both companies in 2023"],
+            ],
+            inputs=chat_input,
+        )
+
+        citations_table = gr.Dataframe(
+            headers=["passage_id", "company", "year", "section", "score", "text preview"],
+            label="Retrieved passages (citations)",
             wrap=True,
         )
 
-    with gr.Tab("Raw JSON"):
-        raw_json = gr.Code(language="json", label="Full ResearchNote JSON")
+    # ── Tab 3: Data Explorer ──────────────────────────────────────────────────
+    with gr.Tab("🔍 Data Explorer"):
+        gr.Markdown(
+            "Search the passage index directly. Useful for understanding what "
+            "was retrieved and debugging retrieval quality."
+        )
+        with gr.Row():
+            search_query = gr.Textbox(label="Search query", scale=3)
+            company_dd = gr.Dropdown(
+                ["All", "MSFT", "GOOGL"], value="All", label="Company", scale=1
+            )
+            year_dd = gr.Dropdown(
+                ["All", "2022", "2023", "2024"], value="All", label="Year", scale=1
+            )
+            search_btn = gr.Button("Search", variant="primary", scale=1)
 
-    run_btn.click(
-        fn=run,
-        inputs=[y1, y2, y3],
-        outputs=[results_table, fact_table, status_box, raw_json],
-    )
+        search_results = gr.Dataframe(
+            headers=["passage_id", "company", "year", "section", "score", "text preview"],
+            label="Search results (BM25 + vectors + RRF + reranked)",
+            wrap=True,
+        )
 
-    # Auto-run on load with defaults
+    # ── Tab 4: Raw JSON ───────────────────────────────────────────────────────
+    with gr.Tab("🗂️ Raw Data"):
+        gr.Markdown("Full `ResearchNote` JSON from the C0 baseline pipeline.")
+        raw_btn = gr.Button("Load Raw JSON")
+        raw_json = gr.Code(language="json", label="ResearchNote JSON")
+
+    # ── event handlers ────────────────────────────────────────────────────────
+
+    def refresh_dashboard():
+        rev, margin, income, rows, stats = load_dashboard()
+        return rev, margin, income, rows, stats
+
+    def load_raw():
+        note = _get_baseline_data()
+        return note.to_json()
+
     demo.load(
-        fn=run,
-        inputs=[y1, y2, y3],
-        outputs=[results_table, fact_table, status_box, raw_json],
+        fn=refresh_dashboard,
+        outputs=[rev_chart, margin_chart, income_chart, metrics_table, stats_md],
     )
+    # Preload retriever in background so chat works without manual ingestion
+    _try_preload_retriever()
+    refresh_btn.click(
+        fn=refresh_dashboard,
+        outputs=[rev_chart, margin_chart, income_chart, metrics_table, stats_md],
+    )
+    ingest_btn.click(fn=run_ingestion, outputs=ingest_status)
+
+    send_btn.click(
+        fn=chat_fn,
+        inputs=[chat_input, chatbot, years_input],
+        outputs=[chatbot, chat_input, citations_table],
+    )
+    chat_input.submit(
+        fn=chat_fn,
+        inputs=[chat_input, chatbot, years_input],
+        outputs=[chatbot, chat_input, citations_table],
+    )
+
+    search_btn.click(
+        fn=search_passages,
+        inputs=[search_query, company_dd, year_dd],
+        outputs=search_results,
+    )
+    raw_btn.click(fn=load_raw, outputs=raw_json)
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7861, theme=gr.themes.Soft())
+    demo.launch(
+        server_name="127.0.0.1",
+        server_port=7861,
+        theme=gr.themes.Soft(),
+    )
