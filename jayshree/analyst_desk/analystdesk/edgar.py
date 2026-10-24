@@ -191,6 +191,7 @@ def get_annual_fact(cik: str, concept: str, fiscal_year: int) -> dict | None:
     latest = max(annual, key=lambda e: e.get("filed", ""))
     return {
         "val": entry["val"],
+        "start": entry.get("start"),
         "end": entry["end"],
         "accn": entry["accn"],
         "filed": entry["filed"],

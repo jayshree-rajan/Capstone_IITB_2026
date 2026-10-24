@@ -430,7 +430,7 @@ config.py                 # all prompts + model IDs in one versioned file
 | 0 | Pre-L4 | Scope validation | ✅ Done |
 | 1 | L4, L13 | EDGAR + C0 baseline | ✅ Done (15 companies, as-reported facts, bank pre-tax margin) |
 | 2 | L4–L6 | Hybrid retrieval (BM25+vectors+RRF+reranker) | ✅ Built + Recall@5 measured; labels need team review |
-| 3 | L7 | 4 FastMCP servers | — |
+| 3 | L7 | 4 FastMCP servers | ✅ 8 tools, tests, stdio verified; Docker sandbox awaits Docker install |
 | 4 | L8, L10 | C1 single agent + LangGraph | — |
 | 5 | L9 | Memory + policy | — |
 | 6 | L11, L14 | C2 multi-agent + hooks + approval gate | — |
@@ -452,3 +452,5 @@ config.py                 # all prompts + model IDs in one versioned file
 | Oct 2026 | Jayshree (with Claude Code) | 1 | EDGAR client and cache, C0 baseline, note schema, Gradio demo |
 | 2026-10-24 | Jayshree (with Claude Code) | 1 | Windows setup; as-reported XBRL facts with restatement warnings; full-year filter; bank pre-tax margin |
 | 2026-10-24 | Jayshree (with Claude Code) | 2 | 10-K parser fixes (MA, MS, WFC, BAC, JPM, V); table-aware parsing + plain variant; retrieval switches; query decomposition; 36 labelled queries; Recall@5 ladder |
+| 2026-10-24 | Jayshree (with Claude Code) | 2 | C0 uses decomposed retrieval and the companies named in the question |
+| 2026-10-24 | Jayshree (with Claude Code) | 3 | MCP servers (filings-kb, edgar, python-sandbox, research-portal); HMAC approval tokens; sandbox import guard + audit hooks + Dockerfile; agent tool permissions; tools.md |

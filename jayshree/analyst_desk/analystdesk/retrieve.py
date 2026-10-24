@@ -104,21 +104,23 @@ class HybridRetriever:
                 )
             print(f"  ✓ Index built: {len(passages)} passages")
 
-    def _matches(self, passage: dict, company: str | None, year: int | None) -> bool:
+    def _matches(self, passage: dict, company: str | None, year: int | None,
+                 item: str | None = None) -> bool:
         return ((not company or passage["company"] == company)
-                and (not year or passage["fiscal_year"] == year))
+                and (not year or passage["fiscal_year"] == year)
+                and (not item or passage["item"] == item))
 
-    def _bm25_search(self, query: str, n: int, company, year) -> list[str]:
+    def _bm25_search(self, query: str, n: int, company, year, item=None) -> list[str]:
         scores = self.bm25.get_scores(_tokenize(query))
         # Filter before taking the top n, so a company/year filter still gets
         # n candidates instead of whatever survives of the global top n
         allowed = [
-            i for i, p in enumerate(self.passages) if self._matches(p, company, year)
+            i for i, p in enumerate(self.passages) if self._matches(p, company, year, item)
         ]
         ranked = sorted(allowed, key=lambda i: scores[i], reverse=True)[:n]
         return [self.pids[i] for i in ranked]
 
-    def _vector_search(self, query: str, n: int, company, year) -> list[str]:
+    def _vector_search(self, query: str, n: int, company, year, item=None) -> list[str]:
         q_emb = self.embedder.encode([query], show_progress_bar=False).tolist()
         # Chroma requires $and when combining multiple filter keys
         filters = []
@@ -126,6 +128,8 @@ class HybridRetriever:
             filters.append({"company": {"$eq": company}})
         if year:
             filters.append({"fiscal_year": {"$eq": str(year)}})
+        if item:
+            filters.append({"item": {"$eq": item}})
         if len(filters) == 1:
             where = filters[0]
         elif len(filters) > 1:
@@ -138,24 +142,26 @@ class HybridRetriever:
     def search(self, query: str, top_k: int = 5,
                company: str | None = None,
                year: int | None = None,
+               item: str | None = None,
                mode: str = "hybrid",
                rerank: bool = True) -> list[dict]:
         """Return top_k passages for query.
 
         mode:   "bm25", "vector" or "hybrid" (both, merged with RRF)
         rerank: re-score the candidates with the cross-encoder
-        Optional filters narrow the search to a specific company or year.
+        Optional filters narrow the search to a company, year and/or item
+        ("item1a" risk factors, "item7" MD&A).
         """
         n_candidates = min(50, len(self.passages))
 
         if mode == "bm25":
-            ranked = self._bm25_search(query, n_candidates, company, year)
+            ranked = self._bm25_search(query, n_candidates, company, year, item)
         elif mode == "vector":
-            ranked = self._vector_search(query, n_candidates, company, year)
+            ranked = self._vector_search(query, n_candidates, company, year, item)
         elif mode == "hybrid":
             ranked = _rrf(
-                self._bm25_search(query, n_candidates, company, year),
-                self._vector_search(query, n_candidates, company, year),
+                self._bm25_search(query, n_candidates, company, year, item),
+                self._vector_search(query, n_candidates, company, year, item),
             )
         else:
             raise ValueError(f"Unknown retrieval mode: {mode!r}")
