@@ -430,7 +430,7 @@ config.py                 # all prompts + model IDs in one versioned file
 | 0 | Pre-L4 | Scope validation | ✅ Done |
 | 1 | L4, L13 | EDGAR + C0 baseline | ✅ Done (15 companies, as-reported facts, bank pre-tax margin) |
 | 2 | L4–L6 | Hybrid retrieval (BM25+vectors+RRF+reranker) | ✅ Built + Recall@5 measured; labels need team review |
-| 3 | L7 | 4 FastMCP servers | ✅ 8 tools, tests, stdio verified; Docker sandbox awaits Docker install |
+| 3 | L7 | 4 FastMCP servers | ✅ 8 tools, tests, stdio verified; Docker sandbox built and attack-tested |
 | 4 | L8, L10 | C1 single agent + LangGraph | — |
 | 5 | L9 | Memory + policy | — |
 | 6 | L11, L14 | C2 multi-agent + hooks + approval gate | — |

@@ -372,7 +372,22 @@ Each tool carries MCP's standard annotations (`readOnlyHint`, `destructiveHint`)
 
 **Layer 2: the container** ([docker/sandbox/Dockerfile](../docker/sandbox/Dockerfile)): no network at all, read-only filesystem, non-root user, all Linux capabilities dropped, plus memory, CPU and process limits.
 
-**Say this in the viva:** layer 1 is a *guard*, not a security boundary, because Python code can find ways around in-process checks. The container is the boundary. `SANDBOX_MODE=auto` uses Docker when it's available, and every result reports which mode ran, so traces show it. Docker sandbox tests are written and run automatically once Docker is installed.
+**Say this in the viva:** layer 1 is a *guard*, not a security boundary, because Python code can find ways around in-process checks. The container is the boundary. `SANDBOX_MODE=auto` uses Docker when it's available, and every result reports which mode ran, so traces show it.
+
+**Proof that the container is a boundary on its own.** We ran *unguarded* Python inside the container: our runner and its import guard were bypassed entirely, with the same `docker run` settings. Results:
+
+| Attack | Result |
+|---|---|
+| DNS lookup / connect to 1.1.1.1 / HTTP request | Failed: "Network is unreachable" (`--network none`) |
+| Overwrite the runner or `/etc/passwd` | Failed: read-only filesystem / permission denied |
+| Write to `/tmp` | Allowed, as intended (16 MB scratch, discarded afterwards) |
+| Who am I? | uid 65534 (`nobody`), not root |
+| Start 65 processes (fork bomb) | Refused at the limit of 64 |
+| Look for secrets in the environment | Only `GPG_KEY`, the official Python image's public signature fingerprint; the API key never enters the container |
+
+So the two layers are independent. The guard catches attacks early, with clear BLOCKED errors for the trace. The container stops them even if the guard is bypassed. That's **defence in depth**.
+
+**Cost:** each `run_python` call in Docker takes about 2–3 seconds (container start-up), against about 0.5 seconds locally. That's acceptable for 5–10 calculations per note, and it can be reduced later with a warm container.
 
 ### 5.8 Engineering problems found and fixed
 

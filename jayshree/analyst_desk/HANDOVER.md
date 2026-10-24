@@ -53,17 +53,31 @@ python -m analystdesk --companies MSFT GOOGL JPM --years 2022 2023 2024 --mode b
 python scripts/eval_retrieval.py                          # Recall@5 report
 ```
 
-## 6. Run the app
+## 6. Sandbox container (recommended)
+
+Install Docker Desktop (Windows: keep "Use WSL 2"; no Docker account needed),
+start it, then build the image once:
+
+```bash
+docker build -t analystdesk-sandbox -f docker/sandbox/Dockerfile .
+```
+
+The python-sandbox server uses it automatically (`SANDBOX_MODE=auto`); without
+Docker it falls back to a local guarded process and the Docker tests are skipped.
+
+## 7. Run the app
 
 ```bash
 python app.py
 # Opens at http://127.0.0.1:7861
 ```
 
-## 7. Next phase
+## 8. Next phase
 
-Phase 3: MCP servers (filings-kb, edgar, python-sandbox, research-portal).
-See `docs/plan.md`; reasoning for every decision so far is in `docs/viva_notes.md`.
+Phase 4: C1 single agent in LangGraph over the MCP tools (plan shown to the
+analyst, SQLite checkpointer, stop and resume). See `docs/plan.md`; tool
+schemas are in `docs/tools.md`; reasoning for every decision so far is in
+`docs/viva_notes.md`.
 
 ---
 
