@@ -1,13 +1,14 @@
 """C0 fixed RAG pipeline — retrieval + EDGAR facts + LLM with fixed prompt.
 
 This is the complete C0 experiment configuration. It is a fixed workflow:
-  1. Retrieve top-k passages from the hybrid index (no agent decides what to retrieve)
+  1. Retrieve top-k passages: hybrid index + reranker, decomposed into one
+     filtered search per company/year named (code decides, not an agent)
   2. Fetch XBRL numbers from EDGAR for the companies mentioned
   3. Fill a fixed prompt template with the retrieved content + numbers
   4. Call the LLM once with that prompt (no tool loop, no planning)
   5. Return the answer with passage citations and fact_ids
 
-C0 uses OpenRouter (free models) via the OpenAI-compatible API.
+C0 uses OpenRouter (C0_MODEL, default openai/gpt-4.1-mini) via the OpenAI-compatible API.
 The model is fixed in config — not chosen by an agent.
 """
 
@@ -17,6 +18,7 @@ import os
 from pathlib import Path
 
 from .edgar import get_financials, get_quarterly_financials
+from .query import find_companies, search_decomposed
 from .scope import COMPANIES, C0_COMPANIES
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -120,11 +122,15 @@ def answer(
     """Run the C0 fixed pipeline. Returns answer dict with citations."""
     years = years or [2022, 2023, 2024]
 
-    # Step 1 — fixed retrieval (no agent decides what to retrieve)
-    hits = retriever.search(question, top_k=top_k)
+    # Step 1 — fixed retrieval (no agent decides what to retrieve). Same
+    # decomposed retrieval as C1/C2 will use, so E1 compares orchestration,
+    # not retrieval quality.
+    hits = search_decomposed(retriever, question, top_k=top_k)
 
-    # Step 2 — fixed EDGAR fetch for C0 pair (MSFT + GOOGL)
-    numbers_text = _format_numbers([c.ticker for c in C0_COMPANIES], years)
+    # Step 2 — fixed EDGAR fetch for the companies named in the question
+    # (the C0 pair when none is named)
+    tickers = find_companies(question) or [c.ticker for c in C0_COMPANIES]
+    numbers_text = _format_numbers(tickers, years)
 
     # Step 3 — fill fixed prompt template
     user_content = ANSWER_TEMPLATE.format(

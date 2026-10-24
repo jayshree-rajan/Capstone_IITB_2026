@@ -271,6 +271,16 @@ Each passage is turned into an embedding with `all-MiniLM-L6-v2`, a small local 
 
 **First-run (v1) numbers, for the record:** best configuration 0.653 (table) / 0.694 (plain), before the label rule and the rewrite.
 
+### 3.9 C0 uses the same retrieval as C1 and C2
+
+**What.** The C0 pipeline ([c0_pipeline.py](../analystdesk/c0_pipeline.py)) now retrieves with decomposition and rewrite. It also fetches EDGAR numbers for the companies named in the question, instead of always Microsoft and Alphabet.
+
+**Why.** E1 asks whether agents justify their cost (C0 fixed workflow vs C1 single agent vs C2 team, "same model, tools and budget"). If C0 had weaker retrieval, the agents would look better for the wrong reason. With identical retrieval, any difference comes from orchestration.
+
+**Is C0 still "fixed"?** Yes. Decomposition is deterministic code: the same question always produces the same searches. No model decides what to retrieve. That is the line between C0 and C1.
+
+**Before and after.** Asked "Compare Microsoft and Alphabet operating margins", the old C0 cited Apple passages. The new C0 cites MSFT and GOOGL MD&A. A JPM-vs-GS question used to receive Microsoft's numbers; it now receives JPM's and GS's.
+
 **Likely questions:**
 - *"Isn't changing labels after seeing results cheating?"* It would be if we only relaxed the failing ones, or if this were the held-out set. We applied one written rule to every query, kept the original labels and results, and the held-out check is still to be done by someone who didn't tune the system.
 - *"Why is the reranker so slow?"* It runs a transformer on each (query, passage) pair: 50 pairs per query, on CPU. A GPU or a smaller candidate pool would cut it.
