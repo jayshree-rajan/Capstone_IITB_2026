@@ -25,7 +25,7 @@ EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 CACHE_DIR = Path(__file__).parent.parent / "data" / "edgar_cache"
 
 # SEC requires a descriptive User-Agent with contact info
-USER_AGENT = "AnalystDesk IITBombay contact@example.com"
+USER_AGENT = "AnalystDesk IITBombay 25.jayshree@gmail.com"
 
 # Revenue concept names differ by company. Most post-ASC-606 companies use
 # RevenueFromContractWithCustomerExcludingAssessedTax; older or bank filings

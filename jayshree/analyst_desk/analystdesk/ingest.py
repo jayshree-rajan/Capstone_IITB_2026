@@ -24,7 +24,7 @@ SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 FILING_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{doc}"
 CACHE_DIR = Path(__file__).parent.parent / "data" / "edgar_cache"
 PASSAGES_DIR = Path(__file__).parent.parent / "data" / "passages"
-USER_AGENT = "AnalystDesk IITBombay contact@example.com"
+USER_AGENT = "AnalystDesk IITBombay 25.jayshree@gmail.com"
 
 # Items to extract — key for the Analyst Desk use case
 TARGET_ITEMS = {
