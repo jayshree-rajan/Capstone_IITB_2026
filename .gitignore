@@ -27,6 +27,7 @@ jayshree/analyst_desk/data/index/
 jayshree/analyst_desk/data/10k/
 # Portal DB and approval signing key (secret) stay local
 jayshree/analyst_desk/data/portal/
+jayshree/analyst_desk/data/approval/
 
 # Notebook checkpoints
 .ipynb_checkpoints/

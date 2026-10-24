@@ -408,3 +408,41 @@ So the two layers are independent. The guard catches attacks early, with clear B
 8. Why can't the audit hook alone stop `import socket`?
 9. Why does the edgar server return facts but not margins?
 10. How does the critic verify a number? (`get_fact` on the cited fact_id)
+
+---
+
+## 6. Running it in Docker (early part of L16)
+
+**Code:** [compose.yaml](../compose.yaml), [Dockerfile](../Dockerfile), [docker/sandbox/Dockerfile](../docker/sandbox/Dockerfile).
+
+**What `docker compose up` starts:**
+
+| Service | Role | Network |
+|---|---|---|
+| `index` | Builds the vector index once, then exits | internal |
+| `filings-kb`, `edgar`, `python-sandbox`, `research-portal` | The MCP servers, over HTTP on port 8000 | **internal only, no internet** |
+| `app` | The Gradio UI on port 7861 | internal + outside (needs OpenRouter) |
+
+**Design decisions and why:**
+
+1. **One image, many services.** The app and all four servers share one image, and only the start command differs. That means one build, and identical code and library versions everywhere.
+2. **Models baked into the image.** The embedding and reranker models are downloaded at build time, and containers run offline (`HF_HUB_OFFLINE=1`). Every teammate gets byte-identical models, and the internal-only servers never need the internet.
+3. **CPU-only PyTorch.** The default Linux PyTorch download bundles GPU (CUDA) libraries, about 3 GB extra. We have no GPU, and the brief says none is needed.
+4. **A one-shot `index` service.** Chroma stores its index in a database file. Two processes building it at the same time could corrupt it, so the app and filings-kb wait until `index` has finished (`service_completed_successfully`).
+5. **An internal network for the tools.** The MCP servers can talk to the app but have no route to the internet. Even a compromised tool can't send data out. That's least privilege at the network level, matching least privilege at the tool level (section 5.2).
+6. **The sandbox container is itself the boundary.** It is read-only, drops all capabilities, runs non-root, has memory and process limits, and has no internet. Code runs in a guarded child process inside it, so we don't need to give the server control of Docker (mounting the Docker socket would effectively hand it the whole machine).
+7. **Data mounted read-only from the repo.** Passages and XBRL JSON come from git, so the image never goes stale. Only the index and the portal database live in Docker volumes.
+8. **The app port is bound to 127.0.0.1.** Only this machine can open it, not others on the Wi-Fi.
+9. **Secrets stay in `.env`,** read by the app container only. The MCP servers never receive the OpenRouter key.
+
+**Two things found while testing:**
+- **Docker Desktop's "Resource Saver"** pauses its VM after a few idle minutes, and the next command takes 10–30 s to wake it. Our sandbox originally allowed only 5 s, so tests failed or skipped at random. The startup allowance is now 30 s.
+- **One timed-out container kept running for 29 minutes,** because the host-side kill failed while Docker was waking. Fixes:
+  - The runner now **stops itself** at the time limit (an alarm signal inside the container).
+  - The host removes the container with `docker rm -f` as a backstop.
+
+  Two independent stops, again defence in depth.
+
+**Likely questions:**
+- *"Why not mount the Docker socket so the sandbox server can start a fresh container per call?"* Access to the socket is effectively root on the host. A bug or injection in the sandbox server would then control the whole machine. A single locked-down container with a guarded child process is safer.
+- *"What still needs adding for the full L16 bar?"* Prometheus, Grafana and an alert (Phase 8), the agent graph (Phases 4–6), CI with an evaluation gate, and a test install on a clean machine.

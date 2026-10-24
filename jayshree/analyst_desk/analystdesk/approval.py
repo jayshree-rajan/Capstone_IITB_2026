@@ -14,7 +14,7 @@ A plain hash would not do: anyone (including an injected agent) could
 compute it. The HMAC key is what makes the token a signature.
 
 The key comes from the APPROVAL_SECRET environment variable; for local
-development a random key is created once in data/portal/approval.key
+development a random key is created once in data/approval/approval.key
 (gitignored).
 """
 
@@ -29,7 +29,9 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-KEY_FILE = Path(__file__).parent.parent / "data" / "portal" / "approval.key"
+# Separate from the portal DB: in Docker this folder is a volume shared by
+# the app (signs) and the portal (verifies); the app gets no access to the DB
+KEY_FILE = Path(__file__).parent.parent / "data" / "approval" / "approval.key"
 
 
 class ApprovalError(ValueError):
@@ -42,7 +44,13 @@ def _key() -> bytes:
         return env.encode()
     if not KEY_FILE.exists():
         KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        KEY_FILE.write_text(secrets.token_hex(32), encoding="utf-8")
+        try:
+            # "x" = create only if absent: when the app and the portal start
+            # together, exactly one key is written and both then read it
+            with open(KEY_FILE, "x", encoding="utf-8") as f:
+                f.write(secrets.token_hex(32))
+        except FileExistsError:
+            pass
     return KEY_FILE.read_text(encoding="utf-8").strip().encode()
 
 

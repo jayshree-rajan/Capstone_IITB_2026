@@ -30,14 +30,25 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 _WITHHELD_ENV = ("OPENROUTER_API_KEY",)
 
 
+def _url_var(name: str) -> str:
+    """Env var holding a server's HTTP URL, e.g. MCP_URL_FILINGS_KB."""
+    return "MCP_URL_" + name.upper().replace("-", "_")
+
+
 def connections(servers: list[str] | None = None) -> dict:
+    """stdio subprocesses, or HTTP when MCP_URL_<SERVER> is set (Docker Compose)."""
     env = {k: v for k, v in os.environ.items() if k not in _WITHHELD_ENV}
-    return {
-        name: {"transport": "stdio", "command": sys.executable, "args": ["-m", module],
-               "cwd": str(PROJECT_DIR), "env": env}
-        for name, module in SERVERS.items()
-        if servers is None or name in servers
-    }
+    out = {}
+    for name, module in SERVERS.items():
+        if servers is not None and name not in servers:
+            continue
+        url = os.getenv(_url_var(name))
+        if url:
+            out[name] = {"transport": "streamable_http", "url": url}
+        else:
+            out[name] = {"transport": "stdio", "command": sys.executable, "args": ["-m", module],
+                         "cwd": str(PROJECT_DIR), "env": env}
+    return out
 
 
 def make_client(servers: list[str] | None = None, interceptors: list | None = None) -> MultiServerMCPClient:

@@ -22,6 +22,7 @@ import builtins
 import contextlib
 import io
 import json
+import signal
 import sys
 import traceback
 
@@ -49,6 +50,14 @@ blocked: list[str] = []
 
 class SandboxBlocked(PermissionError):
     pass
+
+
+class SandboxTimeout(Exception):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise SandboxTimeout()
 
 
 def _audit(event, args):
@@ -84,7 +93,7 @@ def _jsonable(value):
 
 
 def main() -> None:
-    request = json.loads(sys.stdin.read())
+    request = json.loads(sys.stdin.read().lstrip("\ufeff"))   # tolerate a UTF-8 BOM
     real_stdout = sys.stdout
 
     # Load libraries before the hooks so their own start-up is not affected
@@ -100,12 +109,22 @@ def main() -> None:
     namespace = {"__builtins__": safe_builtins, "data": request.get("data"),
                  "pd": pd, "np": np, "result": None}
 
+    # The code stops itself at the time limit (Linux, i.e. in the container),
+    # so a runaway loop ends even if the host fails to kill the container
+    timeout_s = int(request.get("timeout_s") or 0)
+    if timeout_s and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(timeout_s)
+
     captured = io.StringIO()
     out = {"ok": True, "stdout": "", "result": None, "error": None, "blocked": []}
     try:
         with contextlib.redirect_stdout(captured):
             exec(compile(request["code"], "<sandbox>", "exec"), namespace)
         out["result"] = json.loads(json.dumps(namespace.get("result"), default=_jsonable))
+    except SandboxTimeout:
+        out.update(ok=False, error={"code": "TIMEOUT",
+                                    "message": f"code ran longer than {timeout_s}s and was stopped"})
     except SandboxBlocked as exc:
         out.update(ok=False, error={"code": "BLOCKED", "message": str(exc)})
     except BaseException as exc:   # noqa: BLE001 — report every failure to the caller

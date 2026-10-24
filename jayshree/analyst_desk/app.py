@@ -475,7 +475,8 @@ with gr.Blocks(title="Analyst Desk") as demo:
 
 if __name__ == "__main__":
     demo.launch(
-        server_name="127.0.0.1",
-        server_port=7861,
+        # Docker sets APP_HOST=0.0.0.0 so the published port reaches the app
+        server_name=os.getenv("APP_HOST", "127.0.0.1"),
+        server_port=int(os.getenv("APP_PORT", "7861")),
         theme=gr.themes.Soft(),
     )

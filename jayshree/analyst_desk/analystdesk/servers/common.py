@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import traceback
 from typing import Any, Literal
 
@@ -75,3 +76,18 @@ def structured_errors(result_cls: type[ToolResult]):
                 return fail(result_cls, "INTERNAL", f"{type(exc).__name__}: {exc}")
         return inner
     return wrap
+
+
+def serve(mcp) -> None:
+    """Run a server over the transport chosen by MCP_TRANSPORT.
+
+    stdio (default)  development: the client starts the server as a subprocess
+    http             Docker Compose: each server is its own container, reached
+                     at http://<service>:<MCP_PORT>/mcp on the internal network
+    """
+    if os.getenv("MCP_TRANSPORT", "stdio") == "http":
+        hosts = [h for h in os.getenv("MCP_ALLOWED_HOSTS", "").split(",") if h]
+        mcp.run(transport="http", host="0.0.0.0", port=int(os.getenv("MCP_PORT", "8000")),
+                show_banner=False, **({"allowed_hosts": hosts} if hosts else {}))
+    else:
+        mcp.run()

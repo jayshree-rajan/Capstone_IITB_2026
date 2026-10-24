@@ -38,11 +38,12 @@ from typing import Annotated, Any, Literal
 from fastmcp import FastMCP
 from pydantic import Field
 
-from .common import READ_ONLY, ToolError, ToolResult, fail, structured_errors
+from .common import READ_ONLY, ToolError, ToolResult, fail, serve, structured_errors
 
 RUNNER = Path(__file__).with_name("sandbox_runner.py")
 IMAGE = os.getenv("SANDBOX_IMAGE", "analystdesk-sandbox:latest")
 MAX_CODE_CHARS = 20_000
+DOCKER_STARTUP_S = int(os.getenv("SANDBOX_DOCKER_STARTUP_S", "30"))
 
 mcp = FastMCP(
     "python-sandbox",
@@ -68,7 +69,7 @@ def docker_available() -> bool:
         return False
     try:
         probe = subprocess.run(["docker", "image", "inspect", IMAGE],
-                               capture_output=True, timeout=10)
+                               capture_output=True, timeout=30)   # Docker Desktop may be waking from Resource Saver
         return probe.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -119,7 +120,7 @@ def run_python(
         return fail(RunResult, "BAD_INPUT", f"code longer than {MAX_CODE_CHARS} characters")
 
     mode = _mode()
-    request = json.dumps({"code": code, "data": data})
+    request = json.dumps({"code": code, "data": data, "timeout_s": timeout_s})
     name = f"sbx-{uuid.uuid4().hex[:12]}"
     if mode == "docker":
         cmd, env, cwd = _docker_cmd(name), None, None
@@ -130,11 +131,13 @@ def run_python(
 
     try:
         proc = subprocess.run(cmd, input=request, capture_output=True, text=True,
-                              timeout=timeout_s + (5 if mode == "docker" else 0),
+                              # container start-up, plus waking Docker Desktop's VM after idle
+                              timeout=timeout_s + (DOCKER_STARTUP_S if mode == "docker" else 0),
                               env=env, cwd=cwd)
     except subprocess.TimeoutExpired:
         if mode == "docker":
-            subprocess.run(["docker", "kill", name], capture_output=True)
+            # Backstop: the runner also stops itself at the limit
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
         result = fail(RunResult, "TIMEOUT", f"code ran longer than {timeout_s}s and was stopped")
         result.sandbox_mode = mode
         return result
@@ -156,4 +159,4 @@ def run_python(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    serve(mcp)

@@ -1,0 +1,14 @@
+# Keep the build context small and secrets out of images
+.env
+.env.*
+.venv/
+**/__pycache__/
+*.pyc
+.git/
+.vscode/
+*.code-workspace
+data/
+docs/
+tests/
+notebooks/
+*.pdf

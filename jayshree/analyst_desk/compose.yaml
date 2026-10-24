@@ -1,0 +1,133 @@
+# Analyst Desk — app + four MCP servers.
+#
+#   docker compose up --build      first time (builds images, then the index)
+#   docker compose up              afterwards
+#   open http://127.0.0.1:7861
+#
+# Needs: .env with OPENROUTER_API_KEY (see .env.example). The first start
+# builds the vector index once (~10 min on CPU); later starts reuse it.
+# Prometheus, Grafana and the agent graph join this file in later phases.
+
+x-image: &image
+  image: analystdesk:latest
+  build: .
+
+x-data: &data
+  - ./data/passages:/app/data/passages:ro
+  - ./data/edgar_cache:/app/data/edgar_cache:ro
+  - index:/app/data/index
+
+x-mcp: &mcp
+  <<: *image
+  restart: unless-stopped
+  networks: [tools]
+  environment: &mcp-env
+    MCP_TRANSPORT: http
+    MCP_PORT: "8000"
+  healthcheck:
+    test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2)"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 20s
+
+services:
+  # Builds the Chroma index once, then exits. Everything that reads the index
+  # waits for it, so two processes never build it at the same time.
+  index:
+    <<: *image
+    command: ["python", "-c", "from analystdesk.retrieve import get_retriever; get_retriever()"]
+    volumes: *data
+    networks: [tools]
+
+  filings-kb:
+    <<: *mcp
+    command: ["python", "-m", "analystdesk.servers.filings_kb"]
+    environment:
+      <<: *mcp-env
+      MCP_ALLOWED_HOSTS: "filings-kb:8000,filings-kb"
+    volumes: *data
+    depends_on:
+      index: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s   # loads the embedding + reranker models first
+
+  edgar:
+    <<: *mcp
+    command: ["python", "-m", "analystdesk.servers.edgar_server"]
+    environment:
+      <<: *mcp-env
+      MCP_ALLOWED_HOSTS: "edgar:8000,edgar"
+    volumes:
+      - ./data/edgar_cache:/app/data/edgar_cache:ro
+
+  # Runs LLM-written code. This container *is* the boundary: no internet
+  # (internal network), read-only filesystem, no capabilities, non-root,
+  # process/memory limits. Code runs in a guarded child process inside it.
+  python-sandbox:
+    <<: *mcp
+    command: ["python", "-m", "analystdesk.servers.sandbox"]
+    environment:
+      <<: *mcp-env
+      MCP_ALLOWED_HOSTS: "python-sandbox:8000,python-sandbox"
+      SANDBOX_MODE: local
+    read_only: true
+    tmpfs: ["/tmp:size=32m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 512m
+
+  research-portal:
+    <<: *mcp
+    command: ["python", "-m", "analystdesk.servers.portal"]
+    environment:
+      <<: *mcp-env
+      MCP_ALLOWED_HOSTS: "research-portal:8000,research-portal"
+      APPROVAL_SECRET: ${APPROVAL_SECRET:-}
+    volumes:
+      - portal:/app/data/portal
+      - approval:/app/data/approval   # verifies with the shared signing key
+
+  app:
+    <<: *image
+    command: ["python", "app.py"]
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: "7861"
+      SANDBOX_MODE: local
+      # The agent graph (Phase 4) reaches the tools here
+      MCP_URL_FILINGS_KB: http://filings-kb:8000/mcp
+      MCP_URL_EDGAR: http://edgar:8000/mcp
+      MCP_URL_PYTHON_SANDBOX: http://python-sandbox:8000/mcp
+      MCP_URL_RESEARCH_PORTAL: http://research-portal:8000/mcp
+    volumes:
+      - ./data/passages:/app/data/passages:ro
+      - ./data/edgar_cache:/app/data/edgar_cache:ro
+      - index:/app/data/index
+      - approval:/app/data/approval   # signs approvals; no access to the portal DB
+    ports:
+      - "127.0.0.1:7861:7861"   # this machine only
+    networks: [tools, outside]
+    depends_on:
+      index: {condition: service_completed_successfully}
+      filings-kb: {condition: service_healthy}
+      edgar: {condition: service_healthy}
+      python-sandbox: {condition: service_healthy}
+      research-portal: {condition: service_healthy}
+
+networks:
+  tools:
+    internal: true   # no route to the internet
+  outside: {}        # the app's way out (OpenRouter) and its published port
+
+volumes:
+  index:
+  portal:
+  approval:

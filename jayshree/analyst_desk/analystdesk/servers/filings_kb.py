@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from ..query import search_decomposed
 from ..scope import COMPANIES
-from .common import COVERED_YEARS, READ_ONLY, ToolResult, fail, structured_errors
+from .common import COVERED_YEARS, READ_ONLY, ToolResult, fail, serve, structured_errors
 
 mcp = FastMCP(
     "filings-kb",
@@ -135,4 +135,4 @@ if __name__ == "__main__":
     # on first call inside a tool's worker thread hung (torch/transformers
     # imports on Windows), and preloading also makes the first search fast.
     _get_retriever()
-    mcp.run()
+    serve(mcp)

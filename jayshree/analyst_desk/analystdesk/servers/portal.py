@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 
 from .. import approval
 from ..scope import COMPANIES
-from .common import READ_ONLY, WRITE, ToolResult, fail, structured_errors
+from .common import READ_ONLY, WRITE, ToolResult, fail, serve, structured_errors
 
 DEFAULT_DB = Path(__file__).resolve().parent.parent.parent / "data" / "portal" / "portal.db"
 
@@ -166,4 +166,4 @@ def publish_note(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    serve(mcp)

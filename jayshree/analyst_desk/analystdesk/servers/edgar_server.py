@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from .. import edgar
 from ..scope import COMPANIES
-from .common import COVERED_YEARS, READ_ONLY, ToolResult, fail, structured_errors
+from .common import COVERED_YEARS, READ_ONLY, ToolResult, fail, serve, structured_errors
 
 mcp = FastMCP(
     "edgar",
@@ -193,4 +193,4 @@ def get_fact(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    serve(mcp)
