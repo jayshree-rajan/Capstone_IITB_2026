@@ -1,6 +1,10 @@
 import unittest
 
-from analystdesk.ingest import _split_sections
+from bs4 import BeautifulSoup
+
+from analystdesk.ingest import (
+    TABLE_END, TABLE_START, _chunk_item, _chunk_table, _mark_tables, _split_sections,
+)
 
 BODY = "Body text that is long enough to count as real section content. " * 40
 
@@ -50,6 +54,54 @@ class SplitSectionsTests(unittest.TestCase):
         result = _split_sections(doc, use_titles=True)
         self.assertIn("mdna", result["item7"])
         self.assertIn("risks", result["item1a"])
+
+
+DATA_TABLE = """
+<table>
+  <tr><td>(In millions)</td><td></td><td>2024</td><td></td><td>2023</td></tr>
+  <tr><td>Revenue</td><td>$</td><td>245,122</td><td>$</td><td>211,915</td></tr>
+  <tr><td>Other income</td><td></td><td>(1,646</td><td>)</td><td>788</td></tr>
+</table>
+"""
+LAYOUT_TABLE = "<table><tr><td>ITEM 1A.</td><td>RISK FACTORS</td></tr></table>"
+
+
+class TableTests(unittest.TestCase):
+    def test_data_table_becomes_marked_rows_with_merged_cells(self):
+        soup = BeautifulSoup(DATA_TABLE, "html.parser")
+        _mark_tables(soup)
+        text = soup.get_text()
+        self.assertIn(TABLE_START, text)
+        self.assertIn("Revenue | $245,122 | $211,915", text)
+        self.assertIn("Other income | (1,646) | 788", text)
+
+    def test_layout_table_stays_plain_text(self):
+        # Item headings laid out in a table must still be seen as headings
+        soup = BeautifulSoup(LAYOUT_TABLE, "html.parser")
+        _mark_tables(soup)
+        self.assertNotIn(TABLE_START, soup.get_text())
+
+    def test_large_table_split_by_rows_repeats_header(self):
+        rows = ["Metric | 2024 | 2023"] + [f"Line {i} | {i},000 | {i},100" for i in range(200)]
+        chunks = _chunk_table(rows, "Segment results", max_chars=500)
+        self.assertGreater(len(chunks), 1)
+        for c in chunks:
+            self.assertTrue(c.startswith("Segment results\nMetric | 2024 | 2023"))
+        # no row lost or cut in half
+        body = [ln for c in chunks for ln in c.split("\n")[2:]]
+        self.assertEqual(body, rows[1:])
+
+    def test_item_text_and_tables_become_separate_passages(self):
+        text = f"Results of operations\n\n{TABLE_START}\nA | 1 | 2\nB | 3 | 4\n{TABLE_END}\n\nMore text."
+        kinds = [k for k, _ in _chunk_item(text)]
+        self.assertEqual(kinds, ["text", "table", "text"])
+        table = dict((k, c) for k, c in _chunk_item(text))["table"]
+        self.assertTrue(table.startswith("Results of operations\nA | 1 | 2"))
+
+    def test_toc_rows_inside_table_are_not_headings(self):
+        doc = lines("ITEM 7. MD&A", "first " + BODY, TABLE_START, "Item 8. Financial Statements | 50",
+                    "Item 9A. Controls | 90", TABLE_END, "second " + BODY, "ITEM 7A. RISK", "x")
+        self.assertIn("second", _split_sections(doc, use_titles=False)["item7"])
 
 
 if __name__ == "__main__":

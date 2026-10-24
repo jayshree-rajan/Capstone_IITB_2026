@@ -12,24 +12,32 @@ Why each step:
   RRF    — combines without needing to tune score scales
   Rerank — cross-encoder sees query + passage together, much more accurate
            but too slow to run on all passages, so only on top-k after RRF
+
+Each step can be switched off (mode, rerank) so the evaluation can measure
+what it adds: see scripts/eval_retrieval.py.
 """
 
 from __future__ import annotations
 
-import json
+import hashlib
+import re
 from pathlib import Path
-from typing import Any
 
 INDEX_DIR = Path(__file__).parent.parent / "data" / "index"
 
 _retriever = None
 
 
+def _tokenize(text: str) -> list[str]:
+    """Lowercase word tokens; punctuation dropped so "revenue," matches "revenue"."""
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
 def _rrf(bm25_hits: list[str], vec_hits: list[str], k: int = 60) -> list[str]:
     """Reciprocal Rank Fusion — merge two ranked lists into one.
 
     RRF score = sum of 1/(k + rank) across lists.
-    k=60 is the standard default (Robertson & Zaragoza 2009).
+    k=60 is the standard default (Cormack, Clarke & Buettcher 2009).
     Returns passage_ids sorted by descending RRF score.
     """
     scores: dict[str, float] = {}
@@ -40,21 +48,31 @@ def _rrf(bm25_hits: list[str], vec_hits: list[str], k: int = 60) -> list[str]:
     return sorted(scores, key=lambda p: scores[p], reverse=True)
 
 
+def _collection_name(passages: list[dict], prefix: str) -> str:
+    """Name the Chroma collection after the passages it holds.
+
+    Re-ingesting changes the passages, so it gets a fresh collection instead
+    of silently reusing embeddings of the old ones.
+    """
+    digest = hashlib.sha1()
+    for p in passages:
+        digest.update(p["passage_id"].encode())
+        digest.update(str(len(p["text"])).encode())
+    return f"{prefix}_{digest.hexdigest()[:12]}"
+
+
 class HybridRetriever:
-    def __init__(self, passages: list[dict]):
+    def __init__(self, passages: list[dict], collection_prefix: str = "analyst_desk"):
         from rank_bm25 import BM25Okapi
         import chromadb
         from sentence_transformers import SentenceTransformer, CrossEncoder
 
         self.passages = passages
         self.pid_to_passage = {p["passage_id"]: p for p in passages}
-        texts = [p["text"] for p in passages]
-        pids = [p["passage_id"] for p in passages]
+        self.pids = [p["passage_id"] for p in passages]
 
         # BM25 over tokenised passage texts
-        tokenised = [t.lower().split() for t in texts]
-        self.bm25 = BM25Okapi(tokenised)
-        self.pids = pids
+        self.bm25 = BM25Okapi([_tokenize(p["text"]) for p in passages])
 
         # Chroma vector store with local MiniLM embeddings (no API cost)
         print("  Loading embedding model (first run downloads ~90MB)...")
@@ -62,10 +80,11 @@ class HybridRetriever:
         self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
         client = chromadb.PersistentClient(path=str(INDEX_DIR))
-        self.collection = client.get_or_create_collection("analyst_desk")
+        self.collection = client.get_or_create_collection(
+            _collection_name(passages, collection_prefix)
+        )
 
-        # Only embed if collection is empty
-        if self.collection.count() == 0:
+        if self.collection.count() != len(passages):
             print(f"  Embedding {len(passages)} passages (first run only)...")
             batch = 64
             for i in range(0, len(passages), batch):
@@ -73,7 +92,7 @@ class HybridRetriever:
                 embeddings = self.embedder.encode(
                     [p["text"] for p in batch_p], show_progress_bar=False
                 ).tolist()
-                self.collection.add(
+                self.collection.upsert(
                     ids=[p["passage_id"] for p in batch_p],
                     embeddings=embeddings,
                     documents=[p["text"] for p in batch_p],
@@ -85,23 +104,21 @@ class HybridRetriever:
                 )
             print(f"  ✓ Index built: {len(passages)} passages")
 
-    def search(self, query: str, top_k: int = 5,
-               company: str | None = None,
-               year: int | None = None) -> list[dict]:
-        """Return top_k passages for query using BM25 + vectors + RRF + rerank.
+    def _matches(self, passage: dict, company: str | None, year: int | None) -> bool:
+        return ((not company or passage["company"] == company)
+                and (not year or passage["fiscal_year"] == year))
 
-        Optional filters narrow the search to a specific company or year.
-        """
-        n_candidates = min(50, len(self.passages))
+    def _bm25_search(self, query: str, n: int, company, year) -> list[str]:
+        scores = self.bm25.get_scores(_tokenize(query))
+        # Filter before taking the top n, so a company/year filter still gets
+        # n candidates instead of whatever survives of the global top n
+        allowed = [
+            i for i, p in enumerate(self.passages) if self._matches(p, company, year)
+        ]
+        ranked = sorted(allowed, key=lambda i: scores[i], reverse=True)[:n]
+        return [self.pids[i] for i in ranked]
 
-        # BM25 — keyword search
-        scores = self.bm25.get_scores(query.lower().split())
-        bm25_ranked = sorted(
-            range(len(self.pids)), key=lambda i: scores[i], reverse=True
-        )[:n_candidates]
-        bm25_pids = [self.pids[i] for i in bm25_ranked]
-
-        # Vector search — semantic similarity
+    def _vector_search(self, query: str, n: int, company, year) -> list[str]:
         q_emb = self.embedder.encode([query], show_progress_bar=False).tolist()
         # Chroma requires $and when combining multiple filter keys
         filters = []
@@ -115,45 +132,51 @@ class HybridRetriever:
             where = {"$and": filters}
         else:
             where = None
-        vec_results = self.collection.query(
-            query_embeddings=q_emb,
-            n_results=n_candidates,
-            where=where,
-        )
-        vec_pids = vec_results["ids"][0] if vec_results["ids"] else []
+        results = self.collection.query(query_embeddings=q_emb, n_results=n, where=where)
+        return results["ids"][0] if results["ids"] else []
 
-        # RRF — merge both ranked lists
-        merged_pids = _rrf(bm25_pids, vec_pids)
+    def search(self, query: str, top_k: int = 5,
+               company: str | None = None,
+               year: int | None = None,
+               mode: str = "hybrid",
+               rerank: bool = True) -> list[dict]:
+        """Return top_k passages for query.
 
-        # Apply company/year filter to merged list
-        if company or year:
-            merged_pids = [
-                pid for pid in merged_pids
-                if pid in self.pid_to_passage
-                and (not company or self.pid_to_passage[pid]["company"] == company)
-                and (not year or self.pid_to_passage[pid]["fiscal_year"] == year)
-            ]
+        mode:   "bm25", "vector" or "hybrid" (both, merged with RRF)
+        rerank: re-score the candidates with the cross-encoder
+        Optional filters narrow the search to a specific company or year.
+        """
+        n_candidates = min(50, len(self.passages))
+
+        if mode == "bm25":
+            ranked = self._bm25_search(query, n_candidates, company, year)
+        elif mode == "vector":
+            ranked = self._vector_search(query, n_candidates, company, year)
+        elif mode == "hybrid":
+            ranked = _rrf(
+                self._bm25_search(query, n_candidates, company, year),
+                self._vector_search(query, n_candidates, company, year),
+            )
+        else:
+            raise ValueError(f"Unknown retrieval mode: {mode!r}")
 
         candidates = [
-            self.pid_to_passage[pid]
-            for pid in merged_pids[:n_candidates]
+            self.pid_to_passage[pid] for pid in ranked[:n_candidates]
             if pid in self.pid_to_passage
         ]
-
         if not candidates:
             return []
+
+        if not rerank:
+            return [{**p, "score": 1 / (i + 1)} for i, p in enumerate(candidates[:top_k])]
 
         # Cross-encoder reranker — scores query+passage jointly
         pairs = [(query, c["text"]) for c in candidates]
         rerank_scores = self.reranker.predict(pairs, show_progress_bar=False)
-        ranked = sorted(
+        ranked_pairs = sorted(
             zip(candidates, rerank_scores), key=lambda x: x[1], reverse=True
         )
-
-        results = []
-        for passage, score in ranked[:top_k]:
-            results.append({**passage, "score": float(score)})
-        return results
+        return [{**p, "score": float(s)} for p, s in ranked_pairs[:top_k]]
 
 
 def get_retriever(passages: list[dict] | None = None) -> HybridRetriever:
@@ -166,7 +189,7 @@ def get_retriever(passages: list[dict] | None = None) -> HybridRetriever:
         if not passages:
             raise RuntimeError(
                 "No passages found. Run ingest first: "
-                "python3 -m analystdesk --mode ingest"
+                "python -c \"from analystdesk.ingest import ingest_all; ingest_all()\""
             )
         print(f"Building retriever over {len(passages)} passages...")
         _retriever = HybridRetriever(passages)
