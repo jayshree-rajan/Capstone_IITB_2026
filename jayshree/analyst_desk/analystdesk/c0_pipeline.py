@@ -83,6 +83,16 @@ def _format_numbers(companies_in_query: list[str], years: list[int]) -> str:
                     + (f" → Margin: {margin}%" if margin else "")
                     + f" [fact_id: {op['fact_id']}]"
                 )
+            pretax = data["pretax_income"]
+            if company.margin_basis == "pretax" and pretax:
+                pt_m = round(pretax["val"] / 1_000_000, 1)
+                pt_margin = round(pt_m / (rev["val"] / 1_000_000) * 100, 2) if rev else None
+                lines.append(
+                    f"{ticker} FY{year} Annual Pre-tax Income: ${pt_m:,.1f}M"
+                    + (f" → Pre-tax Margin: {pt_margin}% (banks report no operating income;"
+                       f" do not compare with operating margins)" if pt_margin else "")
+                    + f" [fact_id: {pretax['fact_id']}]"
+                )
             # Quarterly breakdown
             qtrs = get_quarterly_financials(company.cik, year)
             for q in qtrs:

@@ -222,7 +222,7 @@ Each entry in the array:
   "start":  "2023-07-01",
   "end":    "2024-06-30",
   "val":    109433000000,
-  "accn":   "0001193125-26-323660",
+  "accn":   "0000950170-24-087843",
   "fy":     2024,
   "fp":     "FY",
   "form":   "10-K",
@@ -237,12 +237,27 @@ Each entry in the array:
      │
      ├── filter fp == "FY"         → drop Q1/Q2/Q3 quarterly entries
      ├── filter form == "10-K"     → keep only annual reports
-     └── filter end[:4] == "2024"  → period must end in the requested year
-                                       (NOT EDGAR's fy field — see note below)
+     ├── filter end[:4] == "2024"  → period must end in the requested year
+     │                                 (NOT EDGAR's fy field — see note below)
+     ├── filter end − start ≥ 350d → full year only (10-Ks also tag quarterly tables)
+     └── earliest filed            → as originally reported in that year's own 10-K
      │
      ▼
-1 entry: val=109433000000, end="2024-06-30", accn="0001193125-26-323660"
+1 entry: val=109433000000, end="2024-06-30", accn="0000950170-24-087843"
 ```
+
+> **Why the earliest filing and not the latest?**
+> Later 10-Ks restate prior years. Bank of America's FY2025 10-K restated its FY2024
+> revenue from $101,887M to $105,856M. Taking the latest value would give a fact_id that
+> points at a different filing from the 10-K the passages were retrieved from, and the
+> number would not match the text the analyst reads. We keep the as-reported value and
+> list any restatement as a warning on the note.
+
+> **Banks use pre-tax margin.** JPM, GS, BAC, MS and WFC do not report `OperatingIncomeLoss`.
+> Their headline margin is pre-tax income
+> (`IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest`)
+> divided by net revenue (`RevenuesNetOfInterestExpense`; `Revenues` for BAC). Each row
+> carries `margin_basis`, and margins on different bases are never compared.
 
 > **Why end[:4] and not EDGAR's fy field?**
 > EDGAR's `fy` label can be misaligned for companies whose fiscal year doesn't end in December.
@@ -261,8 +276,8 @@ data/edgar_cache/{cik}.json          ← flat file cache, read on every subseque
      │  fetch_company_facts(cik)
      ▼
 get_annual_fact(cik, concept, year)
-     │  filter: fp=FY, form=10-K, end[:4]==year
-     │  pick latest if multiple (amended 10-K/A)
+     │  filter: fp=FY, form=10-K, end[:4]==year, full-year duration
+     │  pick earliest filed (as reported); note any later restatement
      ▼
 { val, end, accn, filed, fact_id }
      │
@@ -298,10 +313,10 @@ LangGraph checkpointer and in Phase 5 for the long-term memory store.
 Every number in the note carries a `fact_id`:
 ```
 format:   {concept}/{fiscal_year}/{accession_number}
-example:  OperatingIncomeLoss/2024/0001193125-26-323660
+example:  OperatingIncomeLoss/2024/0000950170-24-087843
 ```
 
-The accession number (`0001193125-26-323660`) is the SEC's unique identifier for the exact
+The accession number (`0000950170-24-087843`) is the SEC's unique identifier for the exact
 filing. Given this ID you can look up the original 10-K on EDGAR and verify the number
 by hand. The compliance critic (Phase 6) uses this link to verify each number with code.
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.request
+from datetime import date
 from pathlib import Path
 
 EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
@@ -29,8 +30,8 @@ USER_AGENT = "AnalystDesk IITBombay contact@example.com"
 # Revenue concept names differ by company. Most post-ASC-606 companies use
 # RevenueFromContractWithCustomerExcludingAssessedTax; older or bank filings
 # use Revenues. We try each in order and take the first hit.
-# Banks (JPM, GS, BAC, MS, WFC) report net revenues differently — we use
-# "Revenues" which maps to their total net revenue line in XBRL.
+# Banks (JPM, GS, MS, WFC) tag total net revenue as RevenuesNetOfInterestExpense;
+# BAC tags the same line as "Revenues".
 REVENUE_CONCEPTS = {
     # ── Technology ──────────────────────────────────────────────────────────
     "0000789019": [                                         # Microsoft
@@ -69,12 +70,12 @@ REVENUE_CONCEPTS = {
     ],
     # ── Finance ─────────────────────────────────────────────────────────────
     "0000019617": [                                         # JPMorgan Chase
+        "RevenuesNetOfInterestExpense",
         "Revenues",
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
     ],
     "0000886982": [                                         # Goldman Sachs
+        "RevenuesNetOfInterestExpense",
         "Revenues",
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
     ],
     "0000070858": [                                         # Bank of America
         "Revenues",
@@ -85,19 +86,22 @@ REVENUE_CONCEPTS = {
         "Revenues",
     ],
     "0000895421": [                                         # Morgan Stanley
+        "RevenuesNetOfInterestExpense",
         "Revenues",
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
     ],
     "0001141391": [                                         # Mastercard
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
     ],
     "0000072971": [                                         # Wells Fargo
+        "RevenuesNetOfInterestExpense",
         "Revenues",
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
     ],
 }
 OPERATING_INCOME_CONCEPT = "OperatingIncomeLoss"
+PRETAX_INCOME_CONCEPT = (
+    "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest"
+)
 
 
 def _pad_cik(cik: str) -> str:
@@ -158,24 +162,44 @@ def get_annual_fact(cik: str, concept: str, fiscal_year: int) -> dict | None:
     # ends June 30). Filtering on end[:4] works for both Microsoft (June-end)
     # and Alphabet (December-end). This is Signature Challenge A: fiscal year
     # alignment must be done by the period end date, not by the fy label.
+    # Only full-year durations: 10-Ks also tag quarterly figures (e.g. BAC's
+    # quarterly table) with fp == "FY".
     annual = [
         e for e in entries
         if e.get("fp") == "FY"
         and e.get("form") in ("10-K", "10-K/A")
         and e.get("end", "")[:4] == str(fiscal_year)
+        and _duration_days(e) >= 350
     ]
 
     if not annual:
         return None
 
-    entry = max(annual, key=lambda e: e.get("filed", ""))
+    # As originally reported: the earliest 10-K is that year's own filing, so
+    # the fact_id points at the same document the passages come from. Later
+    # 10-Ks restate prior years (BAC restated FY2023-24 revenue in its FY2025
+    # 10-K); a restated value is reported alongside, never silently swapped in.
+    entry = min(annual, key=lambda e: e.get("filed", ""))
+    latest = max(annual, key=lambda e: e.get("filed", ""))
     return {
         "val": entry["val"],
         "end": entry["end"],
         "accn": entry["accn"],
         "filed": entry["filed"],
         "fact_id": f"{concept}/{fiscal_year}/{entry['accn']}",
+        "restated": (
+            {"val": latest["val"], "accn": latest["accn"], "filed": latest["filed"]}
+            if latest["val"] != entry["val"] else None
+        ),
     }
+
+
+def _duration_days(entry: dict) -> int:
+    """Length of the reporting period in days (0 if it has no start date)."""
+    try:
+        return (date.fromisoformat(entry["end"]) - date.fromisoformat(entry["start"])).days
+    except (KeyError, ValueError):
+        return 0
 
 
 def get_quarterly_facts(cik: str, concept: str, fiscal_year: int) -> list[dict]:
@@ -188,8 +212,6 @@ def get_quarterly_facts(cik: str, concept: str, fiscal_year: int) -> list[dict]:
     Returns a list of dicts sorted by period end date, one entry per quarter.
     Duplicate amended filings are deduplicated — latest filed wins.
     """
-    from datetime import date
-
     annual = get_annual_fact(cik, concept, fiscal_year)
     if annual is None:
         return []
@@ -276,15 +298,17 @@ def get_quarterly_financials(cik: str, fiscal_year: int) -> list[dict]:
 
 
 def get_financials(cik: str, fiscal_year: int) -> dict:
-    """Return revenue and operating_income for one company-year.
+    """Return revenue, operating_income and pretax_income for one company-year.
 
     Tries each revenue concept in priority order (company-specific list).
-    Operating income uses the same concept for all companies.
+    Operating and pre-tax income use the same concept for all companies;
+    banks report pre-tax income but not operating income.
 
     Returns:
         {
           "revenue":          { val, end, accn, filed, fact_id } | None,
           "operating_income": { val, end, accn, filed, fact_id } | None,
+          "pretax_income":    { val, end, accn, filed, fact_id } | None,
         }
     """
     revenue = None
@@ -294,5 +318,6 @@ def get_financials(cik: str, fiscal_year: int) -> dict:
             break
 
     op_income = get_annual_fact(cik, OPERATING_INCOME_CONCEPT, fiscal_year)
+    pretax_income = get_annual_fact(cik, PRETAX_INCOME_CONCEPT, fiscal_year)
 
-    return {"revenue": revenue, "operating_income": op_income}
+    return {"revenue": revenue, "operating_income": op_income, "pretax_income": pretax_income}

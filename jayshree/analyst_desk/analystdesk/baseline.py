@@ -61,16 +61,34 @@ def run_baseline(request: ResearchRequest) -> ResearchNote:
             data = get_financials(company.cik, year)
             rev = data["revenue"]
             op = data["operating_income"]
+            pretax = data.get("pretax_income")
 
             rev_m = _to_millions(rev["val"] if rev else None)
             op_m = _to_millions(op["val"] if op else None)
+            pretax_m = _to_millions(pretax["val"] if pretax else None)
             margin = _operating_margin(rev_m, op_m)
+            # Same ratio, different income line: pre-tax income / net revenue
+            pretax_margin = _operating_margin(rev_m, pretax_m)
 
             if rev is None:
                 warnings.append(
                     f"{company.name} FY{year}: revenue not found in EDGAR"
                 )
-            if op is None:
+            for label, fact in (("revenue", rev), ("operating income", op), ("pre-tax income", pretax)):
+                if fact and fact.get("restated"):
+                    later = fact["restated"]
+                    warnings.append(
+                        f"{company.name} FY{year}: {label} as reported "
+                        f"{_to_millions(fact['val']):,.1f}M was restated to "
+                        f"{_to_millions(later['val']):,.1f}M in a later 10-K "
+                        f"({later['accn']}); the note uses the as-reported figure"
+                    )
+            # Only the headline income line is required for this company
+            if company.margin_basis == "pretax" and pretax is None:
+                warnings.append(
+                    f"{company.name} FY{year}: pre-tax income not found in EDGAR"
+                )
+            if company.margin_basis == "operating" and op is None:
                 warnings.append(
                     f"{company.name} FY{year}: operating income not found in EDGAR"
                 )
@@ -84,11 +102,15 @@ def run_baseline(request: ResearchRequest) -> ResearchNote:
                 revenue_fact_id=rev["fact_id"] if rev else None,
                 operating_income_fact_id=op["fact_id"] if op else None,
                 period_end=rev["end"] if rev else (op["end"] if op else None),
+                margin_basis=company.margin_basis,
+                pretax_income_usd_m=pretax_m,
+                pretax_margin_pct=pretax_margin,
+                pretax_income_fact_id=pretax["fact_id"] if pretax else None,
             ))
 
     years = request.fiscal_years
     title = (
-        f"Microsoft vs Alphabet: Operating Margins "
+        f"{' vs '.join(c.name for c in request.companies)}: Margins "
         f"FY{years[0]}–FY{years[-1]} (C0 Baseline)"
     )
     return ResearchNote(

@@ -19,6 +19,10 @@ class Company:
     ticker: str
     cik: str
     sector: str
+    # Headline margin. Banks don't report OperatingIncomeLoss in XBRL, so they
+    # use pre-tax margin (pre-tax income / net revenue). Fixed per company so
+    # the basis never switches between years; the two are never compared.
+    margin_basis: str = "operating"
 
 
 # ── Technology sector ────────────────────────────────────────────────────────
@@ -35,13 +39,13 @@ TECH = (
 
 # ── Finance sector ────────────────────────────────────────────────────────────
 FINANCE = (
-    Company("JPMorgan Chase",  "JPM", "0000019617", "Finance"),
-    Company("Goldman Sachs",   "GS",  "0000886982", "Finance"),
-    Company("Bank of America", "BAC", "0000070858", "Finance"),
+    Company("JPMorgan Chase",  "JPM", "0000019617", "Finance", "pretax"),
+    Company("Goldman Sachs",   "GS",  "0000886982", "Finance", "pretax"),
+    Company("Bank of America", "BAC", "0000070858", "Finance", "pretax"),
     Company("Visa",            "V",   "0001403161", "Finance"),
-    Company("Morgan Stanley",  "MS",  "0000895421", "Finance"),
+    Company("Morgan Stanley",  "MS",  "0000895421", "Finance", "pretax"),
     Company("Mastercard",      "MA",  "0001141391", "Finance"),
-    Company("Wells Fargo",     "WFC", "0000072971", "Finance"),
+    Company("Wells Fargo",     "WFC", "0000072971", "Finance", "pretax"),
 )
 
 COMPANIES: Tuple[Company, ...] = TECH + FINANCE

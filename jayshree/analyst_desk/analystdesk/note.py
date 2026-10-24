@@ -19,8 +19,13 @@ class MetricRow:
     """One company + fiscal year measurement, with sources.
 
     All dollar values are in USD millions (rounded to 1 decimal place).
-    operating_margin_pct is derived — it has no EDGAR fact_id of its own
-    because it is computed in code from revenue and operating_income.
+    Margins are derived — they have no EDGAR fact_id of their own because
+    they are computed in code from revenue and the matching income line.
+
+    margin_basis says which margin is the headline for this company:
+    "operating" (operating income / revenue) or "pretax" (pre-tax income /
+    net revenue, used for banks). Margins on different bases must not be
+    compared with each other.
     """
     company: str
     fiscal_year: int
@@ -30,6 +35,20 @@ class MetricRow:
     revenue_fact_id: str | None
     operating_income_fact_id: str | None
     period_end: str | None                  # e.g. "2024-06-30" from EDGAR
+    margin_basis: str = "operating"
+    pretax_income_usd_m: float | None = None
+    pretax_margin_pct: float | None = None  # computed, not from EDGAR
+    pretax_income_fact_id: str | None = None
+
+    def headline_income_fact_id(self) -> str | None:
+        if self.margin_basis == "pretax":
+            return self.pretax_income_fact_id
+        return self.operating_income_fact_id
+
+    def headline_margin_pct(self) -> float | None:
+        if self.margin_basis == "pretax":
+            return self.pretax_margin_pct
+        return self.operating_margin_pct
 
 
 @dataclass
@@ -53,10 +72,10 @@ class ResearchNote:
     warnings: list[str] = field(default_factory=list)
 
     def verified_count(self) -> int:
-        """How many rows have both revenue and operating_income fact_ids."""
+        """How many rows have fact_ids for revenue and their headline income."""
         return sum(
             1 for r in self.rows
-            if r.revenue_fact_id and r.operating_income_fact_id
+            if r.revenue_fact_id and r.headline_income_fact_id()
         )
 
     def verification_pct(self) -> float:
@@ -82,6 +101,10 @@ class ResearchNote:
                     "operating_margin_pct": r.operating_margin_pct,
                     "revenue_fact_id": r.revenue_fact_id,
                     "operating_income_fact_id": r.operating_income_fact_id,
+                    "margin_basis": r.margin_basis,
+                    "pretax_income_usd_m": r.pretax_income_usd_m,
+                    "pretax_margin_pct": r.pretax_margin_pct,
+                    "pretax_income_fact_id": r.pretax_income_fact_id,
                 }
                 for r in self.rows
             ],

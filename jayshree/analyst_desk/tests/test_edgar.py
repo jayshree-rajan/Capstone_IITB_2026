@@ -1,12 +1,13 @@
 """Tests for edgar.py — cache behaviour, fact_id format, missing data handling."""
 
+import copy
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from analystdesk.edgar import (
-    CACHE_DIR,
     _pad_cik,
     get_annual_fact,
     get_financials,
@@ -26,13 +27,13 @@ FAKE_FACTS = {
                 "units": {
                     "USD": [
                         {
-                            "end": "2023-06-30", "val": 211915000000,
+                            "start": "2022-07-01", "end": "2023-06-30", "val": 211915000000,
                             "accn": "0000789019-23-000001", "fy": 2023,
                             "fp": "FY", "form": "10-K", "filed": "2023-07-27"
                         },
                         # quarterly entry — must be filtered out
                         {
-                            "end": "2023-03-31", "val": 52857000000,
+                            "start": "2023-01-01", "end": "2023-03-31", "val": 52857000000,
                             "accn": "0000789019-23-000099", "fy": 2023,
                             "fp": "Q3", "form": "10-Q", "filed": "2023-04-25"
                         },
@@ -42,8 +43,14 @@ FAKE_FACTS = {
             "OperatingIncomeLoss": {
                 "units": {
                     "USD": [
+                        # fourth-quarter figure tagged inside the 10-K
                         {
-                            "end": "2023-06-30", "val": 88523000000,
+                            "start": "2023-04-01", "end": "2023-06-30", "val": 24254000000,
+                            "accn": "0000789019-23-000001", "fy": 2023,
+                            "fp": "FY", "form": "10-K", "filed": "2023-07-27"
+                        },
+                        {
+                            "start": "2022-07-01", "end": "2023-06-30", "val": 88523000000,
                             "accn": "0000789019-23-000001", "fy": 2023,
                             "fp": "FY", "form": "10-K", "filed": "2023-07-27"
                         },
@@ -63,12 +70,28 @@ class TestPadCik(unittest.TestCase):
         self.assertEqual(_pad_cik("0000789019"), "0000789019")
 
 
-class TestFetchCompanyFacts(unittest.TestCase):
+class TempCacheTestCase(unittest.TestCase):
+    """Point edgar.py at a temporary cache holding FAKE_FACTS for MSFT.
+
+    Never touch the real data/edgar_cache: it is committed for the team.
+    """
+    facts = FAKE_FACTS
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        cache_dir = Path(self._tmp.name)
+        patcher = patch("analystdesk.edgar.CACHE_DIR", cache_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
+        (cache_dir / f"{_pad_cik(MSFT_CIK)}.json").write_text(
+            json.dumps(self.facts), encoding="utf-8"
+        )
+
+
+class TestFetchCompanyFacts(TempCacheTestCase):
     def test_uses_cache_on_second_call(self):
         """Second call must read from disk, not hit the network."""
-        cache_file = CACHE_DIR / f"{_pad_cik(MSFT_CIK)}.json"
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps(FAKE_FACTS), encoding="utf-8")
 
         with patch("urllib.request.urlopen") as mock_open:
             result = fetch_company_facts(MSFT_CIK)
@@ -76,25 +99,8 @@ class TestFetchCompanyFacts(unittest.TestCase):
 
         self.assertEqual(result["entityName"], "FAKE CORP")
 
-    def tearDown(self):
-        # Clean up so other tests start fresh
-        cache_file = CACHE_DIR / f"{_pad_cik(MSFT_CIK)}.json"
-        if cache_file.exists():
-            cache_file.unlink()
 
-
-class TestGetAnnualFact(unittest.TestCase):
-    def setUp(self):
-        # Pre-populate cache so no network calls happen
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file = CACHE_DIR / f"{_pad_cik(MSFT_CIK)}.json"
-        cache_file.write_text(json.dumps(FAKE_FACTS), encoding="utf-8")
-
-    def tearDown(self):
-        cache_file = CACHE_DIR / f"{_pad_cik(MSFT_CIK)}.json"
-        if cache_file.exists():
-            cache_file.unlink()
-
+class TestGetAnnualFact(TempCacheTestCase):
     def test_returns_annual_fact(self):
         fact = get_annual_fact(
             MSFT_CIK,
@@ -133,22 +139,37 @@ class TestGetAnnualFact(unittest.TestCase):
         )
         self.assertIsNone(fact)
 
+    def test_ignores_quarterly_figures_tagged_in_a_10k(self):
+        # 10-Ks tag quarterly tables with fp == "FY" too (BAC); only a
+        # full-year duration counts
+        fact = get_annual_fact(MSFT_CIK, "OperatingIncomeLoss", 2023)
+        self.assertEqual(fact["val"], 88523000000)
+
     def test_returns_none_for_unknown_concept(self):
         fact = get_annual_fact(MSFT_CIK, "NonExistentConcept", 2023)
         self.assertIsNone(fact)
 
 
-class TestGetFinancials(unittest.TestCase):
-    def setUp(self):
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        cache_file = CACHE_DIR / f"{_pad_cik(MSFT_CIK)}.json"
-        cache_file.write_text(json.dumps(FAKE_FACTS), encoding="utf-8")
+class TestRestatedFacts(TempCacheTestCase):
+    """A later 10-K restating a prior year must not replace the original."""
+    facts = copy.deepcopy(FAKE_FACTS)
+    facts["facts"]["us-gaap"]["RevenueFromContractWithCustomerExcludingAssessedTax"]["units"]["USD"].append({
+        "start": "2022-07-01", "end": "2023-06-30", "val": 215000000000,
+        "accn": "0000789019-24-000007", "fy": 2024,
+        "fp": "FY", "form": "10-K", "filed": "2024-07-30",
+    })
 
-    def tearDown(self):
-        cache_file = CACHE_DIR / f"{_pad_cik(MSFT_CIK)}.json"
-        if cache_file.exists():
-            cache_file.unlink()
+    def test_keeps_original_and_reports_restatement(self):
+        fact = get_annual_fact(
+            MSFT_CIK, "RevenueFromContractWithCustomerExcludingAssessedTax", 2023
+        )
+        self.assertEqual(fact["val"], 211915000000)
+        self.assertEqual(fact["accn"], "0000789019-23-000001")
+        self.assertEqual(fact["restated"]["val"], 215000000000)
+        self.assertEqual(fact["restated"]["accn"], "0000789019-24-000007")
 
+
+class TestGetFinancials(TempCacheTestCase):
     def test_returns_both_metrics(self):
         result = get_financials(MSFT_CIK, 2023)
         self.assertIsNotNone(result["revenue"])

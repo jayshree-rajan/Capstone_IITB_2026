@@ -123,5 +123,34 @@ class TestRunBaseline(unittest.TestCase):
         json.dumps(note.to_dict())
 
 
+# Banks report pre-tax income but no operating income
+FAKE_JPM = {
+    "revenue": {
+        "val": 180000000000, "end": "2024-12-31",
+        "accn": "0000019617-25-001", "filed": "2025-02-14",
+        "fact_id": "RevenuesNetOfInterestExpense/2024/0000019617-25-001",
+    },
+    "operating_income": None,
+    "pretax_income": {
+        "val": 72000000000, "end": "2024-12-31",
+        "accn": "0000019617-25-001", "filed": "2025-02-14",
+        "fact_id": "IncomeLossFromContinuingOperationsBeforeIncomeTaxes"
+                   "ExtraordinaryItemsNoncontrollingInterest/2024/0000019617-25-001",
+    },
+}
+
+
+class TestBankRows(unittest.TestCase):
+    @patch("analystdesk.baseline.get_financials", return_value=FAKE_JPM)
+    def test_bank_uses_pretax_margin_and_counts_as_verified(self, _mock):
+        note = run_baseline(create_request(["JPM"], [2024]))
+        row = note.rows[0]
+        self.assertEqual(row.margin_basis, "pretax")
+        self.assertIsNone(row.operating_margin_pct)
+        self.assertAlmostEqual(row.headline_margin_pct(), 40.0)
+        self.assertEqual(note.verification_pct(), 100.0)
+        self.assertEqual(note.warnings, [])
+
+
 if __name__ == "__main__":
     unittest.main()
