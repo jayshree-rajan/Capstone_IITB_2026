@@ -85,6 +85,8 @@ class ResearchRequest:
             raise ScopeError("Provide at least one company.")
         if any(not isinstance(c, Company) or c not in COMPANIES for c in self.companies):
             raise ScopeError("All companies must be from the supported list.")
+        if len(set(self.companies)) != len(self.companies):
+            raise ScopeError("Companies must be distinct.")
         years = self.fiscal_years
         if not isinstance(years, tuple) or len(years) < 1:
             raise ScopeError("Provide at least one fiscal year.")

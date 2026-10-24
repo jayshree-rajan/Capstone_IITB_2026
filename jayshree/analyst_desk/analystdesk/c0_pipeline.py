@@ -20,7 +20,7 @@ from .edgar import get_financials, get_quarterly_financials
 from .scope import COMPANIES, C0_COMPANIES
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-C0_MODEL = os.getenv("C0_MODEL", "nvidia/llama-3.1-nemotron-70b-instruct:free")
+C0_MODEL = os.getenv("C0_MODEL", "openai/gpt-4.1-mini")
 
 SYSTEM_PROMPT = """You are a financial research assistant.
 Answer the analyst's question using ONLY the provided context (retrieved passages and EDGAR numbers).

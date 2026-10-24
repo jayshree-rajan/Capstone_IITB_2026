@@ -33,7 +33,6 @@ from analystdesk.edgar import get_quarterly_financials
 from analystdesk.ingest import ingest_all, load_passages, PASSAGES_DIR
 from analystdesk.scope import COMPANIES, C0_COMPANIES, create_request
 
-VENV_PYTHON = "/Users/25.jayshree/Documents/Jayshree.agentic/.venv/bin/python"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
