@@ -649,3 +649,51 @@ Denials go back to the agent as normal tool results, so it adapts instead of cra
 The Research Agent tab has a **👥 Team board** with one row per agent: research lead, each researcher and risk-diff agent, the quant, writer, critic, you (the note gate) and the publisher. Each row shows status (queued → working → handed off), tool calls, last action and details (passages, facts, confidence, errors). It updates live as hook events stream in; in a test run it refreshed 40 times. Mid-run you can see some specialists already handed off while others are still working, which is the parallel fan-out made visible. Loaded runs rebuild the board from their history, because each hand-off now saves that agent's tool calls.
 
 **Demo tip:** start a C2 run, approve the plan, and narrate the board: "five specialists start at once; the quant only has EDGAR and the sandbox; the risk-diff agent hit its budget, and the hook stopped it; the critic verified every number and the judge flagged one claim for me to decide on."
+
+---
+
+## 10. Evaluation, Reflexion and observability (L12, L13, L16)
+
+### 10.1 The golden set and how it's scored
+
+- **Development cases:** [data/evaluation/dev_cases.jsonl](../data/evaluation/dev_cases.jsonl), 20 cases:
+  - 8 numeric, 5 comparison, 4 risk-change, and 3 refusals (an uncovered company, an uncovered year, an investment-advice request).
+  - Expected figures were **computed from XBRL by code and frozen in the file before any agent ran** ([scripts/make_dev_cases.py](../scripts/make_dev_cases.py)).
+- **Held-out cases:** [data/evaluation/heldout/](../data/evaluation/heldout/README.md) is empty on purpose. The brief says the person who tunes the agent must not write them, so **a teammate (Role 5)** writes 40+. No agent tool can read that folder.
+- **Scoring is code first** ([analystdesk/evaluation.py](../analystdesk/evaluation.py)):
+  - **numeric / comparison:** every expected figure appears in the output with the same unit, within rounding. So C0's free text and the agents' code-rendered figures are judged alike.
+  - **risk_change:** the note cites the company's Item 1A passages for **both** years.
+  - **refusal:** it declines, with no figures and no advice.
+  - **Recorded for every run:** policy violations (advice wording), verified share, tools used, tokens, cost and latency.
+- **Runner** ([scripts/run_eval.py](../scripts/run_eval.py)):
+  - C0, C1 and C2 on the same cases, with the same model and tools; the plan gate is auto-approved and runs stop at the note gate (nothing is published);
+  - **memory is forced off**, so runs are reproducible;
+  - failed and timed-out runs are counted, not hidden.
+
+### 10.2 Reflexion (L12)
+
+- [scripts/reflect.py](../scripts/reflect.py) reads a **development** evaluation result (it refuses held-out results). For each agent run it collects what went wrong: failed scoring, and critic issues across revisions. A reflection prompt then turns these into at most 2 lessons per run: *"When <situation>: <what to do>"*, with tags.
+- Lessons are **pending** until a person approves them in the app (Research Agent tab → 📘 Playbook). Rejections are kept with their reason, and the brief asks for one rejected lesson as evidence.
+- Approved lessons are **retrieved only when relevant** (tag and word overlap, top 3) and shown to the planner, researchers and specialists, and writer. Each run's log says how many lessons it used.
+- **Freeze** the playbook before the held-out run; a frozen playbook refuses new approvals. `run_eval.py --no-lessons` gives the "before" runs for E3.
+- Code: [analystdesk/lessons.py](../analystdesk/lessons.py).
+
+### 10.3 Judge calibration (L13)
+
+[scripts/calibrate_judge.py](../scripts/calibrate_judge.py):
+1. `sample` writes about 30 real claim + passage pairs to a CSV, **without** the judge's verdict.
+2. A person labels each one yes/no.
+3. `score` runs the judge on the same rows and reports agreement and **Cohen's kappa**.
+
+**Why kappa, not plain agreement?** If almost every claim is supported, a judge that always says "yes" scores 90%+ agreement while being useless. Kappa subtracts the agreement expected by chance. In our sanity test, 9 of 10 agreeing still gave kappa −0.11.
+
+### 10.4 Observability (following your L14 lecture notebook)
+
+- **Traces:** OpenTelemetry with OpenLLMetry's `LangchainInstrumentor`, exactly as in the lecture, plus a business span `analystdesk.run` (run id, mode, outcome, verified share, tokens), exported over OTLP to **Jaeger**.
+  - A verified test trace had 48 spans: every graph node, every model call and every tool execution.
+  - **Prompt and response text is not captured** (`TRACELOOP_TRACE_CONTENT=false`). That's the lecture's warning that traces can leak what hooks redact.
+- **Metrics:** `prometheus_client` on `/metrics` (port 9464): runs by outcome, latency histogram, tokens and cost, verified/unverified numbers, critic rejections, tool calls by agent, hook denials, and EDGAR cache vs network.
+- **Grafana dashboard** ([docker/grafana/dashboards/analyst_desk.json](../docker/grafana/dashboards/analyst_desk.json)) shows the verified share against the 98% line, cost per note, latency (median and p95), rejections and tokens, tool calls by agent, and denials and EDGAR lookups.
+- **Alert:** Prometheus rule `VerifiedShareBelow98` (the brief's exact alert) ([docker/prometheus/alerts.yml](../docker/prometheus/alerts.yml)).
+- `docker compose up` now also starts **Jaeger (:16686), Prometheus (:9090) and Grafana (:3000)**.
+- **Known gap:** the MCP servers' own spans form separate traces, because trace context isn't propagated over the in-memory MCP connection. The lecture's `traceparent` header approach would fix this over HTTP.

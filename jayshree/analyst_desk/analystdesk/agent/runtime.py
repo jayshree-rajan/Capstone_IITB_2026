@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -104,19 +105,32 @@ async def run_until_gate(run_id: str, payload, on_event: Callable[[Event], Await
         publish = next(t for t in tools if t.name == "publish_note")
         graph = _build(mode, make_llm(), research, publish, passage_text, live=True).compile(checkpointer=saver)
         config = {"configurable": {"thread_id": run_id}, "recursion_limit": 150}
-        async for kind, chunk in graph.astream(payload, config, stream_mode=["updates", "custom"]):
-            if kind == "custom":      # live tool events from the C2 specialists
-                events = [chunk]
-            else:
-                events = []
-                for node, value in chunk.items():
-                    if node == "__interrupt__":
-                        continue
-                    events += _tool_events(value) if node == "tools" else (value or {}).get("trace", [])
-            for ev in events:
-                if on_event:
-                    await on_event(ev)
-        return await _snapshot(graph, config)
+        from .. import observability as obs
+        tokens_before = int((await graph.aget_state(config)).values.get("tokens", 0) or 0)
+        started = time.perf_counter()
+        with obs.run_span(run_id, mode) as span:
+            result = await _stream(graph, payload, config, on_event)
+            values = result["values"]
+            obs.record_tokens(mode, int(values.get("tokens", 0) or 0) - tokens_before)
+            obs.record_run(mode, values, result["interrupts"], time.perf_counter() - started, span)
+        return result
+
+
+async def _stream(graph, payload, config, on_event) -> dict:
+    """Stream the graph to the next gate, passing each event on; return the snapshot."""
+    async for kind, chunk in graph.astream(payload, config, stream_mode=["updates", "custom"]):
+        if kind == "custom":      # live tool events from the C2 specialists
+            events = [chunk]
+        else:
+            events = []
+            for node, value in chunk.items():
+                if node == "__interrupt__":
+                    continue
+                events += _tool_events(value) if node == "tools" else (value or {}).get("trace", [])
+        for ev in events:
+            if on_event:
+                await on_event(ev)
+    return await _snapshot(graph, config)
 
 
 def _build(mode: str, llm, research, publish, passage_text_fn, live: bool = False):

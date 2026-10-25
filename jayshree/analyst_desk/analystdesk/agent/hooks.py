@@ -72,6 +72,8 @@ class Hooks:
         event = {"node": "tool", "agent": agent, "tool": tool, "args": args, "ok": ok,
                  "error": code, "ms": round(ms), "denied": denied}
         self.events.append(event)
+        from .. import observability
+        observability.record_tool(event)
         return event
 
 

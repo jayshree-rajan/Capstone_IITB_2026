@@ -197,7 +197,7 @@ def build_team_graph(llm, tools: list, publish_tool, passage_text=None, judge_ll
     def fan_out(state: AgentState) -> list[Send]:
         """Parallel fan-out: one researcher and one risk-diff per company, one quant."""
         plan = state["plan"]
-        base = {"plan": plan, "round": state.get("replans", 0)}
+        base = {"plan": plan, "round": state.get("replans", 0), "lessons": state.get("lessons") or []}
         sends = [Send("researcher", {**base, "company": t}) for t in plan["companies"]]
         sends.append(Send("quant", base))
         sends += [Send("risk_diff", {**base, "company": t}) for t in plan["companies"]]
@@ -211,6 +211,8 @@ def build_team_graph(llm, tools: list, publish_tool, passage_text=None, judge_ll
                 company=company, companies=", ".join(plan["companies"]), years=years,
                 latest=max(years), prior=max(years) - 1, budget=CALLS_PER_SPECIALIST[agent],
                 plan=json.dumps(plan))
+            from ..lessons import as_prompt
+            system += as_prompt(task.get("lessons") or [])
             budgeted = Hooks(max_calls_per_agent=CALLS_PER_SPECIALIST[agent], allowed=hooks.allowed,
                              calls=hooks.calls, events=hooks.events)
             handoff, tokens = await run_specialist(agent, company, llm, tools_by_name, system,

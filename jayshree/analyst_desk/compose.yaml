@@ -6,7 +6,8 @@
 #
 # Needs: .env with OPENROUTER_API_KEY (see .env.example). The first start
 # builds the vector index once (~10 min on CPU); later starts reuse it.
-# Prometheus, Grafana and the agent graph join this file in later phases.
+# Also starts Jaeger (traces, :16686), Prometheus (metrics + alert, :9090)
+# and Grafana (dashboard, :3000).
 
 x-image: &image
   image: analystdesk:latest
@@ -107,6 +108,8 @@ services:
       MCP_URL_EDGAR: http://edgar:8000/mcp
       MCP_URL_PYTHON_SANDBOX: http://python-sandbox:8000/mcp
       MCP_URL_RESEARCH_PORTAL: http://research-portal:8000/mcp
+      METRICS_HOST: 0.0.0.0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     volumes:
       - ./data/passages:/app/data/passages:ro
       - ./data/edgar_cache:/app/data/edgar_cache:ro
@@ -121,6 +124,35 @@ services:
       edgar: {condition: service_healthy}
       python-sandbox: {condition: service_healthy}
       research-portal: {condition: service_healthy}
+
+  # ── observe ────────────────────────────────────────────────────────────────
+  jaeger:          # traces (as in the L14 lecture notebook): http://127.0.0.1:16686
+    image: jaegertracing/jaeger:2.2.0
+    restart: unless-stopped
+    ports: ["127.0.0.1:16686:16686"]
+    networks: [tools, outside]
+
+  prometheus:      # metrics + the 98% verified-share alert: http://127.0.0.1:9090/alerts
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    networks: [tools, outside]
+
+  grafana:         # dashboard: http://127.0.0.1:3000 (anonymous viewer)
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["127.0.0.1:3000:3000"]
+    networks: [tools, outside]
+    depends_on: [prometheus]
 
 networks:
   tools:

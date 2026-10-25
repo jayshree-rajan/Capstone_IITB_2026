@@ -495,6 +495,10 @@ with gr.Blocks(title="Analyst Desk") as demo:
 
 
 if __name__ == "__main__":
+    # /metrics for Prometheus; traces to Jaeger when OTEL_EXPORTER_OTLP_ENDPOINT is set
+    from analystdesk.observability import init_tracing, start_metrics_server
+    start_metrics_server()
+    init_tracing()
     demo.launch(
         # Docker sets APP_HOST=0.0.0.0 so the published port reaches the app
         server_name=os.getenv("APP_HOST", "127.0.0.1"),

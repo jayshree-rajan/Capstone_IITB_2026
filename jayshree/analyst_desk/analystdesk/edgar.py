@@ -124,12 +124,16 @@ def fetch_company_facts(cik: str) -> dict:
 
     # Parsed files are also kept in memory: each is 3-9 MB and one note
     # looks up several concepts per company-year
+    from .observability import EDGAR
     if str(cache_file) in _parsed:
+        EDGAR.labels("memory").inc()
         return _parsed[str(cache_file)]
     if cache_file.exists():
+        EDGAR.labels("disk_cache").inc()
         _parsed[str(cache_file)] = json.loads(cache_file.read_text(encoding="utf-8"))
         return _parsed[str(cache_file)]
 
+    EDGAR.labels("network").inc()
     url = EDGAR_FACTS_URL.format(cik=padded)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:

@@ -141,6 +141,7 @@ def answer(
 
     # Step 4 — single LLM call, no tool loop
     answer_text = "(LLM not configured — set OPENROUTER_API_KEY)"
+    tokens = 0
     if OPENROUTER_API_KEY:
         try:
             from openai import OpenAI
@@ -158,6 +159,7 @@ def answer(
                 temperature=0.1,
             )
             answer_text = response.choices[0].message.content or "(empty response)"
+            tokens = getattr(response.usage, "total_tokens", 0) or 0
         except Exception as e:
             answer_text = f"(LLM error: {e})"
 
@@ -167,6 +169,7 @@ def answer(
         "years": years,
         "model": C0_MODEL,
         "pipeline": "C0-fixed-RAG",
+        "tokens": tokens,
         # how the answer was built, for display: the fixed steps C0 took
         "steps": {
             "searches": [{"query": sq.text, "company": sq.company, "year": sq.year}

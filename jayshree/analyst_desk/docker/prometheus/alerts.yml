@@ -1,0 +1,20 @@
+groups:
+  - name: analyst-desk
+    rules:
+      # Brief (Analyst Desk, L16): alert when the verified share falls below 98%.
+      - alert: VerifiedShareBelow98
+        expr: |
+          sum(increase(ad_numbers_total{status="verified"}[1h]))
+            / sum(increase(ad_numbers_total[1h])) < 0.98
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Verified share of numbers in drafts fell below 98% over the last hour"
+          description: "{{ $value | humanizePercentage }} of numbers at the note gate were verified."
+      - alert: ToolErrorsHigh
+        expr: sum(increase(ad_tool_calls_total{ok="false"}[15m])) > 10
+        labels:
+          severity: info
+        annotations:
+          summary: "More than 10 failed or denied tool calls in 15 minutes"

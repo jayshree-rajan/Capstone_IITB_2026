@@ -91,6 +91,7 @@ class AgentState(TypedDict, total=False):
     analyst: str
     memory_on: bool
     memory: dict                      # what memory contributed to this run
+    lessons: list                     # approved playbook lessons used in this run
     trace: Annotated[list, operator.add]
 
 
@@ -247,18 +248,27 @@ def common_nodes(llm, publish_tool, passage_text=None, critic=None) -> dict:
             context += ("\nPREVIOUS NOTES (plan a 'what changed since our last note' comparison): "
                         + "; ".join(f"{t} note #{n['note_id']} ({n['published_at'][:10]})"
                                     for t, n in mem["previous_notes"].items()))
+        used = state.get("lessons")
+        if used is None:
+            used = []
+            if os.getenv("AGENT_LESSONS", "1") != "0":   # off for the "before playbook" runs (E3)
+                from .. import lessons as playbook
+                used = await playbook.relevant(state["request"])
+        from ..lessons import as_prompt
         prompt = PLANNER.format(
             tickers=", ".join(sorted(_TICKERS)), years=list(COVERED_YEARS),
             feedback=(("REPLAN BECAUSE: " + state["plan_feedback"]) if state.get("plan_feedback") else "")
-            + context)
+            + context + as_prompt(used))
         result = await llm.with_structured_output(Plan, include_raw=True).ainvoke(
             [SystemMessage(prompt), HumanMessage(state["request"])])
         p: Plan = result["parsed"]
         # code, not the model, enforces coverage
         p.companies = [c.upper() for c in p.companies if c.upper() in _TICKERS] or state["guard"]["companies"]
         p.fiscal_years = [y for y in p.fiscal_years if y in COVERED_YEARS] or list(COVERED_YEARS)
-        return {"plan": p.model_dump(), "plan_feedback": "", "memory": mem, "tokens": usage(result["raw"]),
+        return {"plan": p.model_dump(), "plan_feedback": "", "memory": mem, "lessons": used,
+                "tokens": usage(result["raw"]),
                 "trace": _event("plan", plan=p.model_dump(), replan=bool(state.get("plan_feedback")),
+                                lessons_used=[les["key"] for les in used],
                                 memory_used={"preferences": len(mem.get("preferences", [])),
                                              "previous_notes": sorted(mem.get("previous_notes", {}))})}
 
@@ -311,6 +321,8 @@ def common_nodes(llm, publish_tool, passage_text=None, critic=None) -> dict:
             memory_block += "\nANALYST PREFERENCES:\n- " + "\n- ".join(mem["preferences"])
         if changed:
             memory_block += "\nWHAT CHANGED (code-computed; use the placeholder {WHAT_CHANGED}):\n" + changed
+        from ..lessons import as_prompt
+        memory_block += as_prompt(state.get("lessons") or [])
         prompt = WRITER.format(figures=figures_table(figures), memory=memory_block,
                                issues=("FIX THESE ISSUES FROM THE CHECKER:\n- " + "\n- ".join(issues))
                                if issues else "")
@@ -427,8 +439,9 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None, hooks: Hooks 
     async def research(state: AgentState):
         msgs = state.get("messages") or []
         if not msgs:
+            from ..lessons import as_prompt
             msgs = [SystemMessage(RESEARCHER.format(plan=json.dumps(state["plan"], indent=1),
-                                                    budget=MAX_TOOL_CALLS)),
+                                                    budget=MAX_TOOL_CALLS) + as_prompt(state.get("lessons") or [])),
                     HumanMessage(state["request"])]
             new = msgs
         else:

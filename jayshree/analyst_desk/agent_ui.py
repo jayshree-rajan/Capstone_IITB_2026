@@ -57,6 +57,8 @@ def _event_line(ev: dict) -> str:
         if mem.get("previous_notes"):
             used.append("previous notes on " + ", ".join(mem["previous_notes"]))
         suffix = f" · 🧠 memory used: {'; '.join(used)}" if used else ""
+        if ev.get("lessons_used"):
+            suffix += f" · 📘 {len(ev['lessons_used'])} playbook lesson(s) applied"
         return ("🔁 **Revised plan drafted**" if ev.get("replan")
                 else "📝 **Plan drafted** by the research lead") + suffix
     if n == "review_plan":
@@ -400,6 +402,28 @@ def build_agent_tab():
                 selected_label = gr.Markdown("_Nothing selected_")
                 delete_mem_btn = gr.Button("🗑 Delete selected memory", variant="stop", size="sm")
 
+        with gr.Accordion("📘 Playbook: lessons learned from development runs (review here)", open=False):
+            gr.Markdown(
+                "The reflection step (`scripts/reflect.py`) turns failures on **development** cases into "
+                "short lessons. **None is used until you approve it.** Approved lessons are given to the "
+                "agents only when relevant to the request. **Freeze** the playbook before the held-out run.")
+            playbook_status = gr.Markdown()
+            pending_table = gr.Dataframe(headers=["key", "when", "do", "tags", "from case", "issue that triggered it"],
+                                         interactive=False, wrap=True, label="Pending your review")
+            selected_lesson = gr.State(None)
+            with gr.Row():
+                selected_lesson_md = gr.Markdown("_Click a pending lesson to select it_")
+                lesson_reason = gr.Textbox(label="Reason (required to reject)", scale=2)
+            with gr.Row():
+                approve_lesson_btn = gr.Button("✅ Approve lesson", variant="primary")
+                reject_lesson_btn = gr.Button("🛑 Reject lesson", variant="stop")
+                freeze_btn = gr.Button("🧊 Freeze playbook")
+                unfreeze_btn = gr.Button("Unfreeze")
+            approved_table = gr.Dataframe(headers=["key", "when", "do", "tags", "approved by"],
+                                          interactive=False, wrap=True, label="Approved (used by agents)")
+            rejected_table = gr.Dataframe(headers=["key", "when", "do", "rejected by", "reason"],
+                                          interactive=False, wrap=True, label="Rejected (kept as evidence)")
+
         with gr.Accordion("📚 Published notes (research portal)", open=False):
             past = gr.Dataframe(headers=["id", "published", "approver", "tickers", "title"],
                                 value=_past_notes, wrap=True)
@@ -551,7 +575,62 @@ def build_agent_tab():
         delete_mem_btn.click(on_delete_mem, [selected_mem, approver], [selected_mem, selected_label, *mem_outputs])
         approver.blur(memory_tables, [approver], mem_outputs)
 
-        async def on_page_load(name):
-            return (await refresh_runs(), *await memory_tables(name))
+        async def playbook_tables():
+            from analystdesk import lessons as pb
+            frozen = await pb.is_frozen()
+            pend = [[x["key"], x["when"], x["do"], ", ".join(x.get("applies_to", [])),
+                     f"{x.get('source_case')}/{x.get('source_config', '')}", x.get("source_issue", "")[:160]]
+                    for x in await pb.list_lessons("pending")]
+            appr = [[x["key"], x["when"], x["do"], ", ".join(x.get("applies_to", [])), x.get("reviewed_by", "")]
+                    for x in await pb.list_lessons("approved")]
+            rej = [[x["key"], x["when"], x["do"], x.get("reviewed_by", ""), x.get("review_reason", "")]
+                   for x in await pb.list_lessons("rejected")]
+            status_md = (f"**Playbook {'🧊 FROZEN' if frozen else 'open'}** · {len(pend)} pending · "
+                         f"{len(appr)} approved · {len(rej)} rejected")
+            return status_md, pend, appr, rej
 
-        return on_page_load, [approver], [runs_table, *mem_outputs]
+        pb_outputs = [playbook_status, pending_table, approved_table, rejected_table]
+
+        def on_pick_lesson(table, evt: gr.SelectData):
+            row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+            return table.iloc[row, 0], f"Selected: **When {table.iloc[row, 1]}** → {table.iloc[row, 2]}"
+
+        async def on_review_lesson(key, name, reason, approve):
+            from analystdesk import lessons as pb
+            if not key:
+                return (None, "_Select a pending lesson first_", reason, *await playbook_tables())
+            if not approve and not (reason or "").strip():
+                return (key, "_Give a reason to reject it_", reason, *await playbook_tables())
+            ok = await pb.review(key, approve, (name or "analyst").strip(), reason or "")
+            msg = (("✅ Approved" if approve else "🛑 Rejected") if ok
+                   else "_Not changed: the playbook is frozen_")
+            return (None, msg, "", *await playbook_tables())
+
+        async def on_freeze(name, frozen):
+            from analystdesk import lessons as pb
+            await pb.set_frozen(frozen, (name or "analyst").strip())
+            return await playbook_tables()
+
+        pending_table.select(on_pick_lesson, [pending_table], [selected_lesson, selected_lesson_md])
+        lesson_review_out = [selected_lesson, selected_lesson_md, lesson_reason, *pb_outputs]
+        async def on_approve_lesson(k, n, r):
+            return await on_review_lesson(k, n, r, True)
+
+        async def on_reject_lesson(k, n, r):
+            return await on_review_lesson(k, n, r, False)
+
+        async def on_freeze_playbook(n):
+            return await on_freeze(n, True)
+
+        async def on_unfreeze_playbook(n):
+            return await on_freeze(n, False)
+
+        approve_lesson_btn.click(on_approve_lesson, [selected_lesson, approver, lesson_reason], lesson_review_out)
+        reject_lesson_btn.click(on_reject_lesson, [selected_lesson, approver, lesson_reason], lesson_review_out)
+        freeze_btn.click(on_freeze_playbook, [approver], pb_outputs)
+        unfreeze_btn.click(on_unfreeze_playbook, [approver], pb_outputs)
+
+        async def on_page_load(name):
+            return (await refresh_runs(), *await memory_tables(name), *await playbook_tables())
+
+        return on_page_load, [approver], [runs_table, *mem_outputs, *pb_outputs]

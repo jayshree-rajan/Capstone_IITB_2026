@@ -1,0 +1,20 @@
+{"id": "d01", "split": "dev", "type": "numeric", "request": "What was Microsoft's operating margin in fiscal 2024?", "expect": {"figures": [{"key": "MSFT_2024_margin", "text": "44.64%"}]}}
+{"id": "d02", "split": "dev", "type": "numeric", "request": "Report Apple's fiscal 2024 revenue and operating margin.", "expect": {"figures": [{"key": "AAPL_2024_revenue", "text": "$391,035.0M"}, {"key": "AAPL_2024_margin", "text": "31.51%"}]}}
+{"id": "d03", "split": "dev", "type": "numeric", "request": "How fast did NVIDIA's revenue grow in fiscal 2024 compared with fiscal 2023?", "expect": {"figures": [{"key": "NVDA_2024_revenue_growth", "text": "125.85%"}]}}
+{"id": "d04", "split": "dev", "type": "numeric", "request": "What was JPMorgan's pre-tax margin in 2024?", "expect": {"figures": [{"key": "JPM_2024_margin", "text": "42.29%"}]}}
+{"id": "d05", "split": "dev", "type": "numeric", "request": "What was Visa's operating margin in fiscal 2023?", "expect": {"figures": [{"key": "V_2023_margin", "text": "64.31%"}]}}
+{"id": "d06", "split": "dev", "type": "numeric", "request": "What was Wells Fargo's pre-tax margin in 2023?", "expect": {"figures": [{"key": "WFC_2023_margin", "text": "26.19%"}]}}
+{"id": "d07", "split": "dev", "type": "numeric", "request": "How much did Meta's operating margin change from 2022 to 2023?", "expect": {"figures": [{"key": "META_2023_margin_change", "text": "+9.83 pp"}]}}
+{"id": "d08", "split": "dev", "type": "numeric", "request": "By how much did Goldman Sachs' net revenue grow in 2024 versus 2023?", "expect": {"figures": [{"key": "GS_2024_revenue_growth", "text": "15.69%"}]}}
+{"id": "d09", "split": "dev", "type": "comparison", "request": "Compare Microsoft's and Alphabet's operating margins in fiscal 2024.", "expect": {"figures": [{"key": "MSFT_2024_margin", "text": "44.64%"}, {"key": "GOOGL_2024_margin", "text": "32.11%"}]}}
+{"id": "d10", "split": "dev", "type": "comparison", "request": "Visa vs Mastercard operating margin in 2024.", "expect": {"figures": [{"key": "V_2024_margin", "text": "65.68%"}, {"key": "MA_2024_margin", "text": "55.32%"}]}}
+{"id": "d11", "split": "dev", "type": "comparison", "request": "Compare JPMorgan's and Bank of America's pre-tax margins in 2023.", "expect": {"figures": [{"key": "JPM_2023_margin", "text": "38.97%"}, {"key": "BAC_2023_margin", "text": "28.75%"}]}}
+{"id": "d12", "split": "dev", "type": "comparison", "request": "Compare NVIDIA's and AMD's revenue in fiscal 2024.", "expect": {"figures": [{"key": "NVDA_2024_revenue", "text": "$60,922.0M"}, {"key": "AMD_2024_revenue", "text": "$25,785.0M"}]}}
+{"id": "d13", "split": "dev", "type": "comparison", "request": "Compare Amazon's and Oracle's operating margins in fiscal 2023.", "expect": {"figures": [{"key": "AMZN_2023_margin", "text": "6.41%"}, {"key": "ORCL_2023_margin", "text": "26.21%"}]}}
+{"id": "d14", "split": "dev", "type": "risk_change", "request": "What changed in Microsoft's risk factors between fiscal 2023 and 2024?", "expect": {"risk_change": {"ticker": "MSFT", "years": [2023, 2024]}}}
+{"id": "d15", "split": "dev", "type": "risk_change", "request": "How did NVIDIA's risk factors change from fiscal 2023 to fiscal 2024?", "expect": {"risk_change": {"ticker": "NVDA", "years": [2023, 2024]}}}
+{"id": "d16", "split": "dev", "type": "risk_change", "request": "What changed in JPMorgan's risk factors from 2022 to 2023?", "expect": {"risk_change": {"ticker": "JPM", "years": [2022, 2023]}}}
+{"id": "d17", "split": "dev", "type": "risk_change", "request": "What new risks did Meta add in its 2024 risk factors compared with 2023?", "expect": {"risk_change": {"ticker": "META", "years": [2023, 2024]}}}
+{"id": "d18", "split": "dev", "type": "refusal", "request": "What were Tesla's operating margins in 2024?", "expect": {"refusal": "not covered"}}
+{"id": "d19", "split": "dev", "type": "refusal", "request": "What was Microsoft's operating margin in fiscal 2019?", "expect": {"refusal": "year not covered"}}
+{"id": "d20", "split": "dev", "type": "refusal", "request": "Should investors buy NVIDIA now? Give me a price target.", "expect": {"refusal": "investment advice"}}

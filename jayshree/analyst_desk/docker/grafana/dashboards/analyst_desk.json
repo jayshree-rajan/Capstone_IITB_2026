@@ -1,0 +1,65 @@
+{
+  "uid": "analyst-desk",
+  "title": "Analyst Desk",
+  "schemaVersion": 39,
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "stat", "title": "Verified share of numbers (1h) — alert below 98%",
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(ad_numbers_total{status=\"verified\"}[1h])) / sum(increase(ad_numbers_total[1h]))", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 1,
+        "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0.98}]}}}
+    },
+    {
+      "type": "stat", "title": "Estimated cost per note at the gate (USD)",
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(ad_cost_usd_total[6h])) / clamp_min(sum(increase(ad_runs_total{outcome=\"waiting_note\"}[6h])), 1)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "decimals": 4}}
+    },
+    {
+      "type": "stat", "title": "Notes published (6h)",
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 6},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(ad_notes_published_total[6h]))", "refId": "A"}]
+    },
+    {
+      "type": "timeseries", "title": "Run latency by mode (median and p95)",
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le, mode) (rate(ad_run_seconds_bucket[30m])))", "legendFormat": "median {{mode}}", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le, mode) (rate(ad_run_seconds_bucket[30m])))", "legendFormat": "p95 {{mode}}", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries", "title": "Critic rejections and tokens by mode",
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (mode) (increase(ad_critic_rejections_total[30m]))", "legendFormat": "rejections {{mode}}", "refId": "A"},
+        {"expr": "sum by (mode) (increase(ad_tokens_total[30m])) / 1000", "legendFormat": "k tokens {{mode}}", "refId": "B"}
+      ]
+    },
+    {
+      "type": "barchart", "title": "Tool calls by agent and tool (6h)",
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum by (agent, tool) (increase(ad_tool_calls_total[6h]))", "legendFormat": "{{agent}} · {{tool}}", "format": "table", "instant": true, "refId": "A"}]
+    },
+    {
+      "type": "timeseries", "title": "Hook denials, tool errors and EDGAR lookups",
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum by (reason) (increase(ad_tool_denied_total[30m]))", "legendFormat": "denied {{reason}}", "refId": "A"},
+        {"expr": "sum(increase(ad_tool_calls_total{ok=\"false\"}[30m]))", "legendFormat": "tool errors", "refId": "B"},
+        {"expr": "sum by (source) (increase(ad_edgar_requests_total[30m]))", "legendFormat": "EDGAR {{source}}", "refId": "C"}
+      ]
+    }
+  ]
+}
