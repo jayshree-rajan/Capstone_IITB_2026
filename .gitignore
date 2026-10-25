@@ -29,6 +29,7 @@ jayshree/analyst_desk/data/10k/
 jayshree/analyst_desk/data/portal/
 jayshree/analyst_desk/data/approval/
 jayshree/analyst_desk/data/runs/
+jayshree/analyst_desk/data/memory/
 
 # Notebook checkpoints
 .ipynb_checkpoints/

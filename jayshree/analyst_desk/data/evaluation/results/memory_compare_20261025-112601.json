@@ -1,0 +1,31 @@
+{
+  "request": "What changed in Microsoft's and Alphabet's operating margins since our last note? Cover fiscal 2022-2024.",
+  "results": [
+    {
+      "run_id": "memon-1792907730",
+      "memory_on": true,
+      "seconds": 17,
+      "tokens": 9646,
+      "tool_calls": 2,
+      "memory_used": [
+        "Always include a peer comparison table"
+      ],
+      "previous_note": true,
+      "what_changed": true,
+      "peer_table": true,
+      "verified": "14/14"
+    },
+    {
+      "run_id": "memoff-1792907747",
+      "memory_on": false,
+      "seconds": 14,
+      "tokens": 9419,
+      "tool_calls": 2,
+      "memory_used": [],
+      "previous_note": false,
+      "what_changed": false,
+      "peer_table": false,
+      "verified": "6/6"
+    }
+  ]
+}

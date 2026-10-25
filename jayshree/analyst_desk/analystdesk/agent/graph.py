@@ -79,6 +79,9 @@ class AgentState(TypedDict, total=False):
     revisions: int
     outcome: str                      # published | rejected | out_of_scope | publish_failed
     published: dict
+    analyst: str
+    memory_on: bool
+    memory: dict                      # what memory contributed to this run
     trace: Annotated[list, operator.add]
 
 
@@ -147,16 +150,45 @@ Never type those numbers yourself: code inserts the exact value and its source.
 filing passage, and that passage id must be cited on the same line, e.g. [MSFT_2024_item7_017].
 - Every claim from a filing cites its passage id in brackets.
 - No buy/sell/hold, price targets or other investment advice.
+- If a WHAT CHANGED block is given below, add a section "What changed since our last note" \
+containing the placeholder {{WHAT_CHANGED}} (code fills it in) and comment on it.
+- Follow the ANALYST PREFERENCES if any are given.
 FORMAT: title, body (Markdown), tickers.
 EXAMPLE: "Operating margin rose from {{MSFT_2022_margin}} to {{MSFT_2024_margin}} as revenue \
 reached {{MSFT_2024_revenue}}; revenue increased 16% on Azure growth [MSFT_2024_item7_017]."
 
 KEY FIGURES:
 {figures}
+{memory}
 {issues}"""
 
 
 # ── graph ─────────────────────────────────────────────────────────────────────
+
+MAX_CONTEXT_CHARS = int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "60000"))
+
+
+def trim_context(msgs: list, max_chars: int = MAX_CONTEXT_CHARS) -> list:
+    """Short-term memory (L9): keep the system prompt, the request and the most
+    recent tool rounds within a size budget. The cut always lands on an AI
+    message, so no tool result is left without the call that asked for it."""
+    def size(m):
+        return len(m.content if isinstance(m.content, str) else json.dumps(m.content))
+    if sum(size(m) for m in msgs) <= max_chars or len(msgs) <= 3:
+        return msgs
+    head, rest = msgs[:2], msgs[2:]
+    budget = max_chars - sum(size(m) for m in head)
+    keep_from = len(rest)
+    for i in range(len(rest) - 1, -1, -1):
+        budget -= size(rest[i])
+        if budget < 0:
+            break
+        if isinstance(rest[i], AIMessage):
+            keep_from = i
+    note = HumanMessage(f"[{keep_from} earlier messages trimmed to fit the context budget; "
+                        "rely on your notes of their results so far.]")
+    return head + [note] + rest[keep_from:]
+
 
 def build_graph(llm, tools: list, publish_tool, passage_text=None):
     """Assemble the C1 graph. tools: the research tools (no write tool);
@@ -189,17 +221,34 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
 
     # 2. plan (also used for replanning, with feedback)
     async def plan(state: AgentState):
+        mem = dict(state.get("memory") or {})
+        if state.get("memory_on", True) and not mem:
+            from .. import memory as ltm
+            prefs = [p["text"] for p in await ltm.preferences(state.get("analyst", "analyst"))]
+            previous = {t: n for t in state["guard"]["companies"] if (n := await ltm.last_note(t))}
+            mem = {"preferences": prefs, "previous_notes": previous}
+        context = ""
+        if mem.get("preferences"):
+            context += "\nANALYST PREFERENCES: " + "; ".join(mem["preferences"])
+        if mem.get("previous_notes"):
+            context += ("\nPREVIOUS NOTES (plan a 'what changed since our last note' comparison): "
+                        + "; ".join(f"{t} note #{n['note_id']} ({n['published_at'][:10]})"
+                                    for t, n in mem["previous_notes"].items()))
         prompt = PLANNER.format(
             tickers=", ".join(sorted(_TICKERS)), years=list(COVERED_YEARS),
-            feedback=("REPLAN BECAUSE: " + state["plan_feedback"]) if state.get("plan_feedback") else "")
+            feedback=(("REPLAN BECAUSE: " + state["plan_feedback"]) if state.get("plan_feedback") else "")
+            + context)
         result = await llm.with_structured_output(Plan, include_raw=True).ainvoke(
             [SystemMessage(prompt), HumanMessage(state["request"])])
         p: Plan = result["parsed"]
         # code, not the model, enforces coverage
         p.companies = [c.upper() for c in p.companies if c.upper() in _TICKERS] or state["guard"]["companies"]
         p.fiscal_years = [y for y in p.fiscal_years if y in COVERED_YEARS] or list(COVERED_YEARS)
-        return {"plan": p.model_dump(), "plan_feedback": "", "tokens": state.get("tokens", 0) + _usage(result["raw"]),
-                "trace": _event("plan", plan=p.model_dump(), replan=bool(state.get("plan_feedback")))}
+        return {"plan": p.model_dump(), "plan_feedback": "", "memory": mem,
+                "tokens": state.get("tokens", 0) + _usage(result["raw"]),
+                "trace": _event("plan", plan=p.model_dump(), replan=bool(state.get("plan_feedback")),
+                                memory_used={"preferences": len(mem.get("preferences", [])),
+                                             "previous_notes": sorted(mem.get("previous_notes", {}))})}
 
     # 3. human gate: approve or edit the plan
     def review_plan(state: AgentState):
@@ -223,7 +272,7 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
             new = msgs
         else:
             new = []
-        reply = await research_llm.ainvoke(msgs)
+        reply = await research_llm.ainvoke(trim_context(msgs))
         calls = len(getattr(reply, "tool_calls", []) or [])
         return {"messages": new + [reply], "tool_calls": state.get("tool_calls", 0) + calls,
                 "tokens": state.get("tokens", 0) + _usage(reply),
@@ -261,7 +310,19 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
             if isinstance(m, (ToolMessage, AIMessage)) and m.content)
         issues = state.get("check", {}).get("issues") if state.get("revisions") else None
         figures = build_figures(state["plan"]["companies"], state["plan"]["fiscal_years"])
-        prompt = WRITER.format(figures=figures_table(figures), issues=("FIX THESE ISSUES FROM THE CHECKER:\n- " + "\n- ".join(issues))
+        mem = state.get("memory") or {}
+        changed = ""
+        if mem.get("previous_notes"):
+            from ..memory import figures_from_note, what_changed
+            current = figures_from_note(" ".join(f["text"] for f in figures.values()))
+            changed = "\n".join(f"- {line}" for t, n in mem["previous_notes"].items()
+                                 for line in what_changed(t, n, current.get(t, {})))
+        memory_block = ""
+        if mem.get("preferences"):
+            memory_block += "\nANALYST PREFERENCES:\n- " + "\n- ".join(mem["preferences"])
+        if changed:
+            memory_block += "\nWHAT CHANGED (code-computed; use the placeholder {WHAT_CHANGED}):\n" + changed
+        prompt = WRITER.format(figures=figures_table(figures), memory=memory_block, issues=("FIX THESE ISSUES FROM THE CHECKER:\n- " + "\n- ".join(issues))
                                if issues else "")
         result = await llm.with_structured_output(Draft, include_raw=True).ainvoke([
             SystemMessage(prompt),
@@ -269,6 +330,11 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
                          f"FINDINGS:\n{findings[-60000:]}")])
         d: Draft = result["parsed"]
         d.body, render_issues = render(d.body, figures)   # code inserts every key figure
+        if changed:   # code inserts the comparison with the last note
+            if "{WHAT_CHANGED}" in d.body:
+                d.body = d.body.replace("{WHAT_CHANGED}", changed)
+            else:
+                d.body += "\n\n## What changed since our last note\n" + changed
         return {"draft": d.model_dump(), "render_issues": render_issues, "tokens": state.get("tokens", 0) + _usage(result["raw"]),
                 "trace": _event("write", revision=state.get("revisions", 0))}
 
@@ -317,9 +383,17 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
         raw = await publish_tool.ainvoke({**d, "approval_token": state["published"]["approval_token"]})
         result = tool_json(raw)
         ok = result.get("ok") is True
+        remembered = False
+        if ok and state.get("memory_on", True):   # only approved, published notes are remembered
+            from ..memory import remember_published_note
+            approver = next((e.get("approver") for e in reversed(state.get("trace", []))
+                             if e.get("node") == "review_note" and e.get("action") == "approve"), "analyst")
+            await remember_published_note(result["note_id"], d["title"], d["body"], d["tickers"],
+                                          approver, state.get("analyst", "analyst"), result.get("published_at"))
+            remembered = True
         return {"outcome": "published" if ok else "publish_failed",
                 "published": {"result": json.dumps(result)[:500], "note_id": result.get("note_id")},
-                "trace": _event("publish", ok=ok, note_id=result.get("note_id"),
+                "trace": _event("publish", ok=ok, note_id=result.get("note_id"), remembered=remembered,
                                 error=(result.get("error") or {}).get("message"))}
 
     g = StateGraph(AgentState)

@@ -50,7 +50,15 @@ def _event_line(ev: dict) -> str:
         return (f"✅ **Scope check** — companies {', '.join(ev['companies'])}" if ev["ok"]
                 else f"⛔ **Out of scope** — {ev['reason']}")
     if n == "plan":
-        return "🔁 **Revised plan drafted**" if ev.get("replan") else "📝 **Plan drafted** by the research lead"
+        mem = ev.get("memory_used") or {}
+        used = []
+        if mem.get("preferences"):
+            used.append(f"{mem['preferences']} preference(s)")
+        if mem.get("previous_notes"):
+            used.append("previous notes on " + ", ".join(mem["previous_notes"]))
+        suffix = f" · 🧠 memory used: {'; '.join(used)}" if used else ""
+        return ("🔁 **Revised plan drafted**" if ev.get("replan")
+                else "📝 **Plan drafted** by the research lead") + suffix
     if n == "review_plan":
         return f"👤 **Plan {'edited and approved' if ev['action'] == 'edit' else 'approved'}** by the analyst"
     if n == "research":
@@ -76,7 +84,9 @@ def _event_line(ev: dict) -> str:
         return f"👤 **Note {ev['action']}{'d' if ev['action'] != 'edit' else 'ed'}** by the analyst"
     if n == "publish":
         if ev["ok"]:
-            return f"📤 **Published** to the research portal" + (f" as note #{ev['note_id']}" if ev.get("note_id") else "")
+            return (f"📤 **Published** to the research portal"
+                    + (f" as note #{ev['note_id']}" if ev.get("note_id") else "")
+                    + (" · 🧠 remembered for next time" if ev.get("remembered") else ""))
         return "❌ **Publish refused** by the portal" + (f": {ev['error']}" if ev.get("error") else "")
     if n == "status_corrected":
         return f"🛠 **Status corrected** to published (note #{ev.get('note_id')}): {ev.get('reason', '')}"
@@ -210,7 +220,9 @@ def build_agent_tab():
         with gr.Row():
             run_id = gr.Textbox(label="Run id (paste one to resume)", scale=2)
             load_btn = gr.Button("⟳ Load run", scale=1)
-            approver = gr.Textbox(label="Your name (recorded on approvals)", value="analyst", scale=2)
+            approver = gr.Textbox(label="Your name (approvals, preferences)", value="analyst", scale=2)
+            use_memory = gr.Checkbox(label="🧠 Use memory", value=True, scale=1,
+                                     info="Off = same agent without preferences or past notes")
         with gr.Accordion("📂 Your runs: click a row to load it", open=True):
             runs_table = gr.Dataframe(
                 headers=["run id", "updated (UTC)", "status", "numbers verified", "tool calls", "request"],
@@ -242,6 +254,25 @@ def build_agent_tab():
         with gr.Accordion("🔧 Agent activity: steps, tool calls and results (live)", open=True):
             activity = gr.Markdown("_No activity yet._")
 
+        with gr.Accordion("🧠 Memory: what the desk remembers (view, add, delete)", open=False):
+            gr.Markdown("Saved only from **your** actions: preferences you add here, and notes you "
+                        "approved and published. Click a row, then delete it. Policy: "
+                        "`docs/memory_policy.md`.")
+            with gr.Row():
+                new_pref = gr.Textbox(label="Add a standing preference", scale=4,
+                                      placeholder="e.g. Always include a peer comparison table")
+                add_pref_btn = gr.Button("Add", scale=1)
+            prefs_table = gr.Dataframe(headers=["key", "preference", "added (UTC)"],
+                                       interactive=False, wrap=True)
+            coverage_table = gr.Dataframe(headers=["ticker", "notes", "last published"],
+                                          interactive=False, label="Coverage list")
+            notes_mem_table = gr.Dataframe(headers=["ticker", "key", "note", "published", "title", "figures"],
+                                           interactive=False, wrap=True, label="Past-note memory")
+            selected_mem = gr.State(None)
+            with gr.Row():
+                selected_label = gr.Markdown("_Nothing selected_")
+                delete_mem_btn = gr.Button("🗑 Delete selected memory", variant="stop", size="sm")
+
         with gr.Accordion("📚 Published notes (research portal)", open=False):
             past = gr.Dataframe(headers=["id", "published", "approver", "tickers", "title"],
                                 value=_past_notes, wrap=True)
@@ -263,11 +294,48 @@ def build_agent_tab():
                 else:
                     yield _view(rid, item, log)
 
-        async def on_start(req):
+        async def memory_tables(name):
+            from analystdesk import memory as ltm
+            analyst = (name or "analyst").strip()
+            prefs = [[p["key"], p["text"], p["added_at"][:16].replace("T", " ")]
+                     for p in await ltm.preferences(analyst)]
+            cov = [[c["ticker"], ", ".join(f"#{n}" for n in c["notes"]), c["last_published"][:16].replace("T", " ")]
+                   for c in await ltm.coverage(analyst)]
+            notes = [[n["ticker"], n["key"], n["note_id"], n["published_at"][:10], n["title"],
+                      ", ".join(f"{k} {v['value']:g}{'%' if v['unit'] == '%' else 'M'}"
+                                for k, v in sorted(n["figures"].items()))]
+                     for n in await ltm.all_note_memories()]
+            return prefs, cov, notes
+
+        async def on_add_pref(name, text):
+            from analystdesk import memory as ltm
+            if text.strip():
+                await ltm.add_preference((name or "analyst").strip(), text)
+            return ("", *await memory_tables(name))
+
+        def on_pick_pref(table, name, evt: gr.SelectData):
+            row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+            key = table.iloc[row, 0]
+            return (["preferences", (name or "analyst").strip(), key],
+                    f"Selected preference: **{table.iloc[row, 1]}**")
+
+        def on_pick_note_mem(table, evt: gr.SelectData):
+            row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+            return (["notes", table.iloc[row, 0], table.iloc[row, 1]],
+                    f"Selected memory of note #{table.iloc[row, 2]} for {table.iloc[row, 0]}")
+
+        async def on_delete_mem(sel, name):
+            from analystdesk import memory as ltm
+            if sel:
+                await ltm.forget(tuple(sel[:2]), sel[2])
+            return (None, "_Deleted._" if sel else "_Nothing selected_", *await memory_tables(name))
+
+        async def on_start(req, name, use_mem):
             if not req.strip():
                 yield (gr.update(), "### Please enter a request", *[gr.update() for _ in range(9)])
                 return
-            async for out in run_step(uuid.uuid4().hex[:8], {"request": req}, []):
+            payload = {"request": req, "analyst": (name or "analyst").strip(), "memory_on": bool(use_mem)}
+            async for out in run_step(uuid.uuid4().hex[:8], payload, []):
                 yield out
 
         async def resume_with(rid, decision):
@@ -320,15 +388,26 @@ def build_agent_tab():
 
         # every action refreshes the runs list afterwards
         for trigger, fn, inputs in (
-                (start_btn.click, on_start, [request]),
-                (request.submit, on_start, [request]),
+                (start_btn.click, on_start, [request, approver, use_memory]),
+                (request.submit, on_start, [request, approver, use_memory]),
                 (approve_plan_btn.click, on_approve_plan, [run_id]),
                 (edit_plan_btn.click, on_edit_plan, [run_id, plan_json]),
                 (approve_note_btn.click, on_approve_note, [run_id, approver]),
                 (edit_note_btn.click, on_edit_note, [run_id, note_body]),
                 (reject_btn.click, on_reject, [run_id, reject_reason]),
                 (load_btn.click, on_load, [run_id])):
-            trigger(fn, inputs, outputs).then(refresh_runs, None, runs_table)
+            (trigger(fn, inputs, outputs).then(refresh_runs, None, runs_table)
+             .then(memory_tables, [approver], [prefs_table, coverage_table, notes_mem_table]))
         runs_table.select(on_pick_run, [runs_table], outputs)
         refresh_runs_btn.click(refresh_runs, None, runs_table)
-        return refresh_runs, runs_table
+        mem_outputs = [prefs_table, coverage_table, notes_mem_table]
+        add_pref_btn.click(on_add_pref, [approver, new_pref], [new_pref, *mem_outputs])
+        prefs_table.select(on_pick_pref, [prefs_table, approver], [selected_mem, selected_label])
+        notes_mem_table.select(on_pick_note_mem, [notes_mem_table], [selected_mem, selected_label])
+        delete_mem_btn.click(on_delete_mem, [selected_mem, approver], [selected_mem, selected_label, *mem_outputs])
+        approver.blur(memory_tables, [approver], mem_outputs)
+
+        async def on_page_load(name):
+            return (await refresh_runs(), *await memory_tables(name))
+
+        return on_page_load, [approver], [runs_table, *mem_outputs]

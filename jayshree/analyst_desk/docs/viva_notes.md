@@ -516,3 +516,57 @@ That verified share is the dashboard metric for the "alert below 98%" (Phase 8).
 **The Research Chat tab** is C0, the fixed baseline. It now shows "How this answer was built": the per-company searches, the EDGAR facts and the model. Years come from the question; the confusing "Fiscal Years" box is gone.
 
 **Live run through the app** (Visa vs Mastercard, run `51e25127`): 18 tool calls, all successful; 95 s; 48k tokens. The checker sent the draft back twice: first two margins the writer had typed itself, then one stray "55%". The final draft reached the gate at 10/11 verified, with the issue shown to the analyst. **That's the design: code flags it, and a person decides.**
+
+---
+
+## 8. Memory (L9): your role
+
+**Code:** [analystdesk/memory.py](../analystdesk/memory.py). Policy: [memory_policy.md](memory_policy.md). Comparison script: [scripts/memory_compare.py](../scripts/memory_compare.py). Tests: [tests/test_memory.py](../tests/test_memory.py).
+
+### 8.1 Two kinds of memory
+
+| | Short-term | Long-term |
+|---|---|---|
+| What | The research conversation inside one run | Preferences, coverage list, past-note memory |
+| Where | The run's state (checkpointer) | LangGraph **store** (SQLite, `data/memory/`) |
+| How managed | **Trimmed** to a size budget (`trim_context`): keeps the system prompt, the request and the most recent tool rounds. The cut always starts on an AI message, so no tool result loses the call that asked for it | Written only after the analyst acts: adding a preference, or approving a note that then gets published |
+| Lifetime | Ends with the run | Until the analyst deletes it |
+
+**Likely question:** *"Checkpointer vs store: what's the difference?"* The checkpointer holds one run's working state, which is what makes stop-and-resume work. The store holds what the desk remembers *across* runs.
+
+### 8.2 What's remembered, and why it's trustworthy
+
+- **Past-note figures are parsed from the published note's own `[fact]` and `[calc]` tags.** Those numbers were already verified by code against XBRL, so memory never holds an unverified number.
+- **Only approved and published notes are remembered.** Drafts and rejected notes never are.
+- **"What changed since our last note" is computed by code** (`memory.what_changed`): previous value → current value, with margin moves in percentage points. The model only comments on the result.
+
+### 8.3 Memory on vs off (the required comparison)
+
+Request: *"What changed in Microsoft's and Alphabet's operating margins since our last note? Cover fiscal 2022–2024."* It was run twice to the note gate (nothing published), with one stored preference ("Always include a peer comparison table") and note #1 in memory. The results were scored by code:
+
+| | Memory ON | Memory OFF |
+|---|---|---|
+| Refers to the previous note (#1) | ✅ | ❌ |
+| Includes the code-computed comparison | ✅ | ❌ |
+| Follows the preference (peer table) | ✅ | ❌ |
+| Numbers verified | 14/14 | 6/6 |
+| Tokens / time | 9.6k / 17 s | 9.4k / 14 s |
+
+Result file: `data/evaluation/results/memory_compare_20261025-112601.json`. You can rerun it with `python scripts/memory_compare.py`.
+
+**Be honest about this in the viva:**
+- The comparison said **"unchanged since the last note"**. That's correct, because both notes use the same FY2022–2024 filings. With a new 10-K the lines would show real moves; the unit test shows "+2.87 pp".
+- Memory costs almost nothing: +2% tokens, about the same time.
+- It's one request, so it's a demonstration, not a statistical result.
+- The scorer was first written to look for one exact heading, and the writer used its own heading. The scorer was fixed to look for the code-computed lines instead, and the runs were re-scored, not re-run.
+
+### 8.4 Correction and deletion (policy in practice)
+
+- **🧠 Memory panel** (Research Agent tab): view preferences, the coverage list and past-note memory, and delete any item.
+- **Use memory** switch: a run with it off neither reads nor writes memory.
+- `scripts/backfill_memory.py` rebuilds past-note memory from the portal. It was used once, for note #1, which was published before memory existed.
+
+**Likely questions:**
+- *"Can the agent change its own memory?"* No. No tool writes memory. Only two code paths do: the analyst's "Add preference", and publish-after-approval.
+- *"What if a stored preference is wrong?"* Delete it in the panel. Each run's activity log shows which preferences were used.
+- *"How do you stop memory from leaking private data?"* Memory holds only the analyst's own preferences and published, verified figures. The private watchlist (L15) gets its own namespace that never reaches a prompt or search tool; that's in the security phase.
