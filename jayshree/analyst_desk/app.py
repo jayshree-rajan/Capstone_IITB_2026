@@ -425,6 +425,11 @@ with gr.Blocks(title="Analyst Desk") as demo:
     agent_load, agent_load_in, agent_load_out = build_agent_tab()
     demo.load(fn=agent_load, inputs=agent_load_in, outputs=agent_load_out)
 
+    # ── Tab: Evaluation (golden set, runs, results, judge calibration) ────────
+    from eval_ui import build_eval_tab
+    eval_load, eval_load_out = build_eval_tab()
+    demo.load(fn=eval_load, outputs=eval_load_out)
+
     # ── Tab 3: Data Explorer ──────────────────────────────────────────────────
     with gr.Tab("🔍 Data Explorer"):
         gr.Markdown(

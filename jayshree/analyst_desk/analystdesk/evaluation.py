@@ -21,8 +21,12 @@ see scripts/calibrate_judge.py.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
+import statistics
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,3 +114,85 @@ def score(case: dict, out: dict) -> dict:
     for k in ("tokens", "seconds", "tools", "error"):
         result[k] = out.get(k)
     return result
+
+
+# ── running cases (used by scripts/run_eval.py and the app's Evaluation tab) ──
+
+RESULTS = EVAL_DIR / "results"
+TIMEOUT_S = 480
+# Blended price for openai/gpt-4.1-mini on OpenRouter ($0.40/M input, $1.60/M
+# output), assuming ~90% of tokens are input as in our runs. An estimate.
+PRICE_PER_M = float(os.getenv("PRICE_PER_M_TOKENS", "0.52"))
+
+
+async def run_c0(case: dict) -> dict:
+    from .c0_pipeline import answer
+    from .retrieve import get_retriever
+    r = await asyncio.to_thread(answer, case["request"], get_retriever())
+    return {"text": r["answer"], "refused": False, "tools": ["fixed:search", "fixed:edgar"],
+            "tokens": r.get("tokens", 0)}
+
+
+async def run_agent(case: dict, mode: str, tag: str) -> dict:
+    from langgraph.types import Command
+    from .agent.runtime import run_until_gate
+    rid = f"eval-{tag}-{mode}-{case['id']}"
+    r = await run_until_gate(rid, {"request": case["request"], "mode": mode, "memory_on": False},
+                             transport="inprocess")
+    if r["interrupts"] and r["interrupts"][0]["gate"] == "plan":
+        r = await run_until_gate(rid, Command(resume={"action": "approve", "approver": "eval"}),
+                                 transport="inprocess")
+    v = r["values"]
+    refused = bool(v.get("guard")) and not v["guard"].get("ok")
+    tools = []
+    for e in v.get("trace", []):
+        if e.get("node") == "research":
+            tools += [c if isinstance(c, str) else c["name"] for c in e.get("tool_calls") or []]
+        if e.get("node") == "handoff":
+            tools += [t["tool"] for t in e.get("tools", [])]
+    text = "" if refused else (v.get("draft") or {}).get("body", "")
+    if refused:
+        text = v["guard"]["reason"]
+    return {"text": text, "refused": refused, "tools": tools, "tokens": v.get("tokens", 0),
+            "check": v.get("check"), "run_id": rid}
+
+
+async def run_one(config: str, case: dict, tag: str) -> dict:
+    start = time.perf_counter()
+    try:
+        coro = run_c0(case) if config == "c0" else run_agent(case, config, tag)
+        out = await asyncio.wait_for(coro, timeout=TIMEOUT_S)
+    except asyncio.TimeoutError:
+        out = {"text": "", "error": "timeout"}
+    except Exception as exc:   # noqa: BLE001 — failed runs are reported, not hidden
+        out = {"text": "", "error": f"{type(exc).__name__}: {exc}"[:300]}
+    out["seconds"] = round(time.perf_counter() - start, 1)
+    res = score(case, out)
+    res.update(config=config, run_id=out.get("run_id"))
+    return res
+
+
+def summarise(rows: list[dict]) -> dict:
+    lat = sorted(r["seconds"] for r in rows)
+    tokens = [r.get("tokens") or 0 for r in rows]
+    by_type = {}
+    for r in rows:
+        t = by_type.setdefault(r["type"], [0, 0])
+        t[0] += r["success"]
+        t[1] += 1
+    shares = [r["verified_share"] for r in rows if r.get("verified_share") is not None]
+    return {
+        "cases": len(rows),
+        "success": sum(r["success"] for r in rows),
+        "by_type": {k: f"{a}/{b}" for k, (a, b) in by_type.items()},
+        "policy_violations": sum(r["policy_violation"] for r in rows),
+        "errors": sum(1 for r in rows if r.get("error")),
+        "timeouts": sum(1 for r in rows if r.get("error") == "timeout"),
+        "verified_share_mean": round(statistics.mean(shares), 1) if shares else None,
+        "tokens_mean": round(statistics.mean(tokens)),
+        "cost_per_case_usd": round(statistics.mean(tokens) * PRICE_PER_M / 1e6, 4),
+        "latency_median_s": round(statistics.median(lat), 1),
+        "latency_p95_s": lat[min(len(lat) - 1, int(round(0.95 * (len(lat) - 1))))],
+    }
+
+
