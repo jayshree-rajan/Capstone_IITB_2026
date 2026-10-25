@@ -497,3 +497,22 @@ That verified share is the dashboard metric for the "alert below 98%" (Phase 8).
 - *"Where is the model deciding and where is code?"* The model plans, chooses tools and writes the prose. Code checks scope, enforces coverage on the plan, computes and inserts every key figure, verifies every number, and signs approvals. People approve the plan and the note.
 - *"What happens if the check still fails after 2 revisions?"* The note goes to the analyst **with the issues listed**. Nothing is hidden, and the analyst can edit or reject.
 - *"How does resume work?"* Every step's state is saved under the run's `thread_id` in SQLite. `Command(resume=decision)` continues from the exact interrupt, even in a different process.
+
+### 7.1 Demoing it in the app (Research Agent tab)
+
+**Code:** [agent_ui.py](../agent_ui.py), and [runtime.py](../analystdesk/agent/runtime.py), which the CLI and the app share.
+
+**In the app:**
+1. Type a request and press **Start**.
+2. The **plan** appears. **Approve** it, or edit the JSON and approve the edited plan.
+3. The **activity log** streams every step live, including each MCP tool call with its arguments (`get_financials(ticker='V', fiscal_year=2024)`) and its result (✔/✖).
+4. The **note** appears, with numbered sources and the code check (e.g. "10/11 numbers verified" with the flagged number listed).
+5. **Approve** (it's signed and published), **edit** (it's re-checked and needs a fresh approval), or **reject**.
+6. **Published notes** lists everything in the research portal.
+7. **Load run** resumes any run by its id, even after restarting the app.
+
+**Tool transport in the app.** The app uses MCP's in-memory transport: the same protocol and schemas as stdio or HTTP, but no subprocesses, and filings-kb reuses the app's already-loaded index.
+
+**The Research Chat tab** is C0, the fixed baseline. It now shows "How this answer was built": the per-company searches, the EDGAR facts and the model. Years come from the question; the confusing "Fiscal Years" box is gone.
+
+**Live run through the app** (Visa vs Mastercard, run `51e25127`): 18 tool calls, all successful; 95 s; 48k tokens. The checker sent the draft back twice: first two margins the writer had typed itself, then one stray "55%". The final draft reached the gate at 10/11 verified, with the issue shown to the analyst. **That's the design: code flags it, and a person decides.**

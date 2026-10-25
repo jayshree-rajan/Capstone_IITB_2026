@@ -205,7 +205,8 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
         calls = len(getattr(reply, "tool_calls", []) or [])
         return {"messages": new + [reply], "tool_calls": state.get("tool_calls", 0) + calls,
                 "tokens": state.get("tokens", 0) + _usage(reply),
-                "trace": _event("research", tool_calls=[c["name"] for c in reply.tool_calls] if calls else [])}
+                "trace": _event("research", tool_calls=[{"name": c["name"], "args": c["args"]}
+                                                       for c in reply.tool_calls] if calls else [])}
 
     def after_research(state) -> Literal["tools", "write"]:
         last = state["messages"][-1]

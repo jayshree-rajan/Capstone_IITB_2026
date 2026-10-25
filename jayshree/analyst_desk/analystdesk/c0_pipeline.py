@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 
 from .edgar import get_financials, get_quarterly_financials
-from .query import find_companies, search_decomposed
+from .query import decompose, find_companies, search_decomposed
 from .scope import COMPANIES, C0_COMPANIES
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -167,4 +167,11 @@ def answer(
         "years": years,
         "model": C0_MODEL,
         "pipeline": "C0-fixed-RAG",
+        # how the answer was built, for display: the fixed steps C0 took
+        "steps": {
+            "searches": [{"query": sq.text, "company": sq.company, "year": sq.year}
+                         for sq in decompose(question)],
+            "edgar_companies": tickers,
+            "edgar_numbers": numbers_text,
+        },
     }

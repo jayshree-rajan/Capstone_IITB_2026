@@ -1,12 +1,12 @@
 import unittest
 
-from analystdesk.agent.__main__ import _FakeToolLLM
+from analystdesk.agent.runtime import _NoModel
 from analystdesk.agent.graph import build_graph
 
 
 class GraphShapeTests(unittest.TestCase):
     def test_nodes_gates_and_loops(self):
-        g = build_graph(_FakeToolLLM(), [], None).compile().get_graph()
+        g = build_graph(_NoModel(), [], None).compile().get_graph()
         nodes = set(g.nodes)
         for n in ("input_guard", "plan", "review_plan", "research", "tools", "replan",
                   "write", "check", "review_note", "publish"):

@@ -29,7 +29,7 @@ ENV HF_HUB_OFFLINE=1 \
 
 COPY analystdesk/ analystdesk/
 COPY scripts/ scripts/
-COPY app.py .
+COPY app.py agent_ui.py ./
 
 # Committed data (passages, XBRL JSON) is mounted from the repo at runtime,
 # so the image never goes stale when data is refreshed.

@@ -258,23 +258,39 @@ def run_ingestion():
         yield f"❌ Ingestion failed: {e}"
 
 
-def chat_fn(message, history, years_str):
+def _steps_markdown(result: dict) -> str:
+    """How C0 built its answer: the fixed searches, EDGAR facts and model."""
+    st = result.get("steps", {})
+    searches = "\n".join(
+        f"| {i} | {s['company'] or 'all'} | {s['year'] or 'all years'} | {s['query']} |"
+        for i, s in enumerate(st.get("searches", []), 1))
+    annual = "\n".join(f"- {ln.strip()}" for ln in st.get("edgar_numbers", "").splitlines()
+                       if "Annual" in ln)
+    years = result.get("years") or []
+    return (
+        f"**Pipeline:** C0 fixed workflow. Code decides every step; one model call "
+        f"(`{result.get('model')}`). The 🤖 Research Agent tab shows real MCP tool calls.\n\n"
+        f"**1. Searches over 10-K passages** (BM25 + vectors, reranked; one per company/year):\n\n"
+        f"| # | Company | Year | Search text |\n|---|---|---|---|\n{searches}\n\n"
+        f"**2. EDGAR XBRL facts given to the model** ({', '.join(st.get('edgar_companies', []))}, "
+        f"FY{min(years)}–FY{max(years)}):\n\n{annual or '_none_'}\n\n"
+        f"**3. Passages cited:** see the table below."
+    )
+
+
+def chat_fn(message, history):
     if not message.strip():
-        yield history, "", [], None
+        yield history, "", [], None, ""
         return
 
-    # Parse years
-    try:
-        years = [int(y.strip()) for y in years_str.split(",") if y.strip()]
-        if len(years) != 3:
-            years = [2022, 2023, 2024]
-    except Exception:
-        years = [2022, 2023, 2024]
+    # Years come from the question ("... in 2023"); otherwise all covered years
+    from analystdesk.query import find_years
+    years = [y for y in find_years(message) if y in (2022, 2023, 2024)] or [2022, 2023, 2024]
 
     history = list(history or [])
     history.append({"role": "user", "content": message})
-    history.append({"role": "assistant", "content": "⏳ Thinking..."})
-    yield history, "", [], None
+    history.append({"role": "assistant", "content": "⏳ Searching filings and EDGAR facts..."})
+    yield history, "", [], None, ""
 
     n_files, n_passages = _passage_stats()
     if n_passages == 0:
@@ -282,7 +298,7 @@ def chat_fn(message, history, years_str):
             "⚠️ No passages indexed yet. Please click **Run Ingestion** "
             "in the Dashboard tab first."
         )
-        yield history, "", [], None
+        yield history, "", [], None, ""
         return
 
     try:
@@ -305,11 +321,11 @@ def chat_fn(message, history, years_str):
         ] for h in hits]
 
         history[-1]["content"] = ans
-        yield history, "", cite_rows, chart
+        yield history, "", cite_rows, chart, _steps_markdown(result)
 
     except Exception as e:
         history[-1]["content"] = f"❌ Error: {e}"
-        yield history, "", [], None
+        yield history, "", [], None, ""
 
 
 def search_passages(query, company_filter, year_filter):
@@ -365,18 +381,15 @@ with gr.Blocks(title="Analyst Desk") as demo:
     # ── Tab 2: Chat ───────────────────────────────────────────────────────────
     with gr.Tab("💬 Research Chat"):
         gr.Markdown(
-            "Ask research questions. Answers use **retrieved 10-K passages** + "
-            "**EDGAR verified numbers**. Every claim is cited.\n\n"
-            "Set `OPENROUTER_API_KEY` in your environment to enable LLM answers."
+            "**C0 baseline**: a fixed workflow with one model call. Answers use **retrieved 10-K "
+            "passages** + **EDGAR verified numbers**, and every claim is cited. Name the companies "
+            "and, optionally, the years in your question (default FY2022–2024). For the agent with "
+            "plan and approval gates, use the **🤖 Research Agent** tab."
         )
-        with gr.Row():
-            years_input = gr.Textbox(
-                value="2022, 2023, 2024", label="Fiscal Years", scale=1
-            )
 
         chatbot = gr.Chatbot(
             height=420, label="Research Assistant",
-            placeholder="Ask about Microsoft and Alphabet financials, risk factors, or MD&A...",
+            placeholder="Ask about any of the 15 companies: financials, risk factors or MD&A...",
         )
         with gr.Row():
             chat_input = gr.Textbox(
@@ -388,13 +401,16 @@ with gr.Blocks(title="Analyst Desk") as demo:
         gr.Examples(
             examples=[
                 ["Compare Microsoft and Alphabet operating margins over 2022–2024"],
-                ["What were Microsoft's main risk factors in FY2024?"],
-                ["How did Alphabet's revenue grow from 2022 to 2024?"],
-                ["What risks did Alphabet highlight related to AI competition?"],
-                ["Compare the MD&A outlook for both companies in 2023"],
+                ["Visa vs Mastercard net revenue in 2024"],
+                ["What were JPMorgan's main risk factors in 2024?"],
+                ["How does the asset cap affect Wells Fargo in 2022?"],
+                ["What risks did NVIDIA highlight about export controls to China in 2023?"],
             ],
             inputs=chat_input,
         )
+
+        with gr.Accordion("🔧 How this answer was built: searches, EDGAR facts, model", open=False):
+            chat_steps = gr.Markdown()
 
         chat_chart = gr.Plot(label="Chart (auto-generated from EDGAR data)", visible=True)
 
@@ -403,6 +419,10 @@ with gr.Blocks(title="Analyst Desk") as demo:
             label="Retrieved passages (citations)",
             wrap=True,
         )
+
+    # ── Tab: Research Agent (C1, with plan and note gates) ────────────────────
+    from agent_ui import build_agent_tab
+    build_agent_tab()
 
     # ── Tab 3: Data Explorer ──────────────────────────────────────────────────
     with gr.Tab("🔍 Data Explorer"):
@@ -456,13 +476,13 @@ with gr.Blocks(title="Analyst Desk") as demo:
 
     send_btn.click(
         fn=chat_fn,
-        inputs=[chat_input, chatbot, years_input],
-        outputs=[chatbot, chat_input, citations_table, chat_chart],
+        inputs=[chat_input, chatbot],
+        outputs=[chatbot, chat_input, citations_table, chat_chart, chat_steps],
     )
     chat_input.submit(
         fn=chat_fn,
-        inputs=[chat_input, chatbot, years_input],
-        outputs=[chatbot, chat_input, citations_table, chat_chart],
+        inputs=[chat_input, chatbot],
+        outputs=[chatbot, chat_input, citations_table, chat_chart, chat_steps],
     )
 
     search_btn.click(
