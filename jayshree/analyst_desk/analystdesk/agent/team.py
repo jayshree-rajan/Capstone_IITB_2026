@@ -217,10 +217,14 @@ def build_team_graph(llm, tools: list, publish_tool, passage_text=None, judge_ll
                                                    budgeted, CALLS_PER_SPECIALIST[agent], _emit())
             handoff.round = task.get("round", 0)
             h = handoff.model_dump()
+            who = f"{agent}/{company}" if company else agent
+            # this agent's hook events, kept in the run's history (live ones only stream)
+            tools_log = [{k: e[k] for k in ("tool", "args", "ok", "error", "ms", "denied")}
+                         for e in hooks.events if e["agent"] == who]
             return {"handoffs": [h], "tool_calls": handoff.tool_calls, "tokens": tokens,
                     "trace": _event("handoff", agent=agent, company=company, confidence=h["confidence"],
                                     passages=len(h["passage_ids"]), facts=len(h["fact_ids"]),
-                                    tool_calls=h["tool_calls"], errors=h["errors"])}
+                                    tool_calls=h["tool_calls"], errors=h["errors"], tools=tools_log)}
         return node
 
     def gather(state: AgentState):

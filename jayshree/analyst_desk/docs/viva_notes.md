@@ -643,3 +643,9 @@ Denials go back to the agent as normal tool results, so it adapts instead of cra
 - **Restated figures are detected by code.** If the same fiscal year now has a different value, the note says "restated since the last note" instead of calling it a change.
 - **A missing previous note is stated plainly.** If the analyst asks "what changed since our last note" and there isn't one, the note says so.
 - **"↻ Re-run this request without memory"** covers independent views, second opinions and debugging, in one click.
+
+### 9.6 Showing it: the team board (app)
+
+The Research Agent tab has a **👥 Team board** with one row per agent: research lead, each researcher and risk-diff agent, the quant, writer, critic, you (the note gate) and the publisher. Each row shows status (queued → working → handed off), tool calls, last action and details (passages, facts, confidence, errors). It updates live as hook events stream in; in a test run it refreshed 40 times. Mid-run you can see some specialists already handed off while others are still working, which is the parallel fan-out made visible. Loaded runs rebuild the board from their history, because each hand-off now saves that agent's tool calls.
+
+**Demo tip:** start a C2 run, approve the plan, and narrate the board: "five specialists start at once; the quant only has EDGAR and the sandbox; the risk-diff agent hit its budget, and the hook stopped it; the critic verified every number and the judge flagged one claim for me to decide on."

@@ -156,10 +156,100 @@ def _past_notes() -> list[list]:
     return [[r[0], r[1], r[2], ", ".join(json.loads(r[3])), r[4]] for r in rows]
 
 
+# ── team board ────────────────────────────────────────────────────────────────
+
+def _board(events: list[dict], mode: str = "c2") -> str:
+    """One row per agent: status, tool calls, last action — built from the events."""
+    plan = next((e["plan"] for e in reversed(events) if e.get("node") == "plan" and e.get("plan")), None)
+    approved = any(e.get("node") == "review_plan" for e in events)
+    rows: dict[str, dict] = {}
+
+    def row(key, role, scope=""):
+        return rows.setdefault(key, {"role": role, "scope": scope, "status": "· idle",
+                                     "calls": 0, "last": "", "detail": ""})
+
+    lead = row("lead", "🧭 Research lead", "plan · fan-out · gather")
+    if plan:
+        lead["status"] = "✅ planned" if approved else "⏸ plan waiting for you"
+        lead["detail"] = f"{', '.join(plan['companies'])} · FY{min(plan['fiscal_years'])}–{max(plan['fiscal_years'])}"
+    if mode == "c2":
+        companies = plan["companies"] if plan else []
+        for t in companies:
+            row(f"researcher/{t}", "🔎 Researcher", t)
+        row("quant", "🧮 Quant", ", ".join(companies) or "all")
+        for t in companies:
+            row(f"risk_diff/{t}", "⚖️ Risk-diff", t)
+        if approved:
+            for k in rows:
+                if k != "lead":
+                    rows[k]["status"] = "⏳ queued"
+    else:
+        single = row("single_agent", "🤖 Single agent (C1)", "all research tools")
+        if approved:
+            single["status"] = "⏳ queued"
+    row("writer", "✍️ Writer", "drafts from evidence")
+    row("critic", "🛡️ Compliance critic" if mode == "c2" else "🔎 Code check", "numbers + claims")
+    row("gate", "👤 You (note gate)", "approve · edit · reject")
+    row("publisher", "📤 Publisher", "publish_note only")
+
+    for e in events:
+        n = e.get("node")
+        if n == "tool":   # live hook event
+            r = rows.get(e["agent"]) or row(e["agent"], e["agent"])
+            r["calls"] += 1
+            r["status"] = "🔄 working"
+            mark = "✔" if e["ok"] else ("⛔" if e.get("denied") else "✖")
+            r["last"] = f"{mark} {e['tool']}" + ("" if e["ok"] else f" {e.get('error')}")
+        elif n == "handoff":
+            key = f"{e['agent']}/{e['company']}" if e.get("company") else e["agent"]
+            r = rows.get(key) or row(key, e["agent"], e.get("company") or "")
+            r["calls"] = e["tool_calls"]
+            if e.get("tools") and not r["last"]:
+                t = e["tools"][-1]
+                r["last"] = ("✔ " if t["ok"] else "✖ ") + t["tool"]
+            r["status"] = "✅ handed off" if not e.get("errors") else "⚠️ handed off"
+            r["detail"] = (f"{e['passages']} passages · {e['facts']} facts · confidence {e['confidence']}"
+                           + (f" · {', '.join(e['errors'])}" if e.get("errors") else ""))
+        elif n == "research":
+            r = row("single_agent", "🤖 Single agent (C1)")
+            r["status"] = "🔄 working"
+            calls = e.get("tool_calls") or []
+            r["calls"] += len(calls)
+            if calls:
+                c = calls[-1]
+                r["last"] = c if isinstance(c, str) else c["name"]
+            else:
+                r["status"] = "✅ done"
+        elif n == "gather":
+            lead["status"] = f"✅ gathered {e['handoffs']} hand-offs"
+        elif n == "replan":
+            lead["status"] = "🔁 replanning"
+        elif n == "write":
+            rows["writer"]["status"] = "✅ drafted" + (f" (revision {e['revision']})" if e.get("revision") else "")
+            rows["critic"]["status"] = "🔄 checking"
+        elif n in ("check", "critic"):
+            c = rows["critic"]
+            c["status"] = "✅ passed" if e["ok"] else f"⚠️ {len(e['issues'])} issue(s)"
+            claims = e.get("claims") or {}
+            c["detail"] = f"{e['verified']}/{e['total']} numbers verified" + (
+                f" · judge {claims.get('supported')}/{claims['checked']} claims" if claims.get("checked") else "")
+            rows["gate"]["status"] = "⏸ waiting for you"
+        elif n == "review_note":
+            rows["gate"]["status"] = {"approve": "✅ approved", "edit": "✏️ edited", "reject": "🛑 rejected"}.get(
+                e["action"], e["action"])
+        elif n == "publish":
+            rows["publisher"]["status"] = (f"✅ published #{e.get('note_id')}" if e["ok"] else "❌ refused")
+
+    lines = ["| Agent | Scope | Status | Tool calls | Last action | Details |", "|---|---|---|---|---|---|"]
+    for r in rows.values():
+        lines.append(f"| {r['role']} | {r['scope']} | {r['status']} | {r['calls'] or ''} | {r['last']} | {r['detail']} |")
+    return "\n".join(lines)
+
+
 # ── driving the agent ─────────────────────────────────────────────────────────
 
 async def _drive(run_id: str, payload):
-    """Yield ("event", line) while the agent runs, then ("done", result)."""
+    """Yield ("event", raw event) while the agent runs, then ("done", result)."""
     from analystdesk.agent.runtime import run_until_gate
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -170,15 +260,16 @@ async def _drive(run_id: str, payload):
     while not (task.done() and queue.empty()):
         try:
             ev = await asyncio.wait_for(queue.get(), timeout=0.5)
-            yield "event", _event_line(ev)
+            yield "event", ev
         except asyncio.TimeoutError:
             continue
     yield "done", task.result()
 
 
-def _view(run_id: str, result: dict, log: list[str]):
+def _view(run_id: str, result: dict, log: list[str], events: list[dict] | None = None):
     """All tab outputs for a run state."""
     v = result.get("values", {})
+    board = _board(events if events is not None else v.get("trace", []), v.get("mode", "c1"))
     gate = result["interrupts"][0] if result.get("interrupts") else None
     usage = f"tool calls **{v.get('tool_calls', 0)}** · tokens **{v.get('tokens', 0):,}**"
 
@@ -219,11 +310,17 @@ def _view(run_id: str, result: dict, log: list[str]):
     return (run_id, status, "\n\n".join(log) or "_No activity yet._",
             gr.update(value=plan_md), gr.update(value=plan_json), gr.update(visible=show_plan),
             gr.update(value=note_md), gr.update(value=check_md), gr.update(value=note_body),
-            gr.update(visible=show_note), _past_notes())
+            gr.update(visible=show_note), _past_notes(), board)
 
 
 def _log_from_trace(values: dict) -> list[str]:
-    return [_event_line(ev) for ev in values.get("trace", [])]
+    lines = []
+    for ev in values.get("trace", []):
+        if ev.get("node") == "handoff":   # replay the agent's tool calls saved with its hand-off
+            who = f"{ev['agent']}/{ev['company']}" if ev.get("company") else ev["agent"]
+            lines += [_event_line({"node": "tool", "agent": who, **t}) for t in ev.get("tools", [])]
+        lines.append(_event_line(ev))
+    return lines
 
 
 # ── the tab ───────────────────────────────────────────────────────────────────
@@ -278,6 +375,9 @@ def build_agent_tab():
                 reject_reason = gr.Textbox(label="Reason for rejecting", scale=2)
                 reject_btn = gr.Button("🛑 Reject", variant="stop")
 
+        with gr.Accordion("👥 Team board: who is doing what (live)", open=True):
+            board = gr.Markdown("_Start a run to see the agents._")
+
         with gr.Accordion("🔧 Agent activity: steps, tool calls and results (live)", open=True):
             activity = gr.Markdown("_No activity yet._")
 
@@ -305,21 +405,24 @@ def build_agent_tab():
                                 value=_past_notes, wrap=True)
 
         outputs = [run_id, status, activity, plan_md, plan_json, plan_box,
-                   note_md, check_md, note_body, note_box, past]
+                   note_md, check_md, note_body, note_box, past, board]
 
-        async def run_step(rid, payload, prior_log):
-            log = list(prior_log)
-            yield (rid, "### ⏳ Agent working…", "\n\n".join(log) or "_Starting…_",
+        async def run_step(rid, payload, prior_log, prior_events=None, mode="c1"):
+            log, events = list(prior_log), list(prior_events or [])
+            yield (rid, "### ⏳ Agents working…", "\n\n".join(log) or "_Starting…_",
                    gr.update(), gr.update(), gr.update(visible=False),
-                   gr.update(), gr.update(), gr.update(), gr.update(visible=False), gr.update())
+                   gr.update(), gr.update(), gr.update(), gr.update(visible=False), gr.update(),
+                   _board(events, mode))
             async for kind, item in _drive(rid, payload):
                 if kind == "event":
-                    log.append(item)
-                    yield (rid, "### ⏳ Agent working…", "\n\n".join(log),
+                    events.append(item)
+                    log.append(_event_line(item))
+                    yield (rid, "### ⏳ Agents working…", "\n\n".join(log),
                            gr.update(), gr.update(), gr.update(visible=False),
-                           gr.update(), gr.update(), gr.update(), gr.update(visible=False), gr.update())
+                           gr.update(), gr.update(), gr.update(), gr.update(visible=False), gr.update(),
+                           _board(events, mode))
                 else:
-                    yield _view(rid, item, log)
+                    yield _view(rid, item, log, events)
 
         async def memory_tables(name):
             from analystdesk import memory as ltm
@@ -359,18 +462,19 @@ def build_agent_tab():
 
         async def on_start(req, name, agents, memory_on=True):
             if not req.strip():
-                yield (gr.update(), "### Please enter a request", *[gr.update() for _ in range(9)])
+                yield (gr.update(), "### Please enter a request", *[gr.update() for _ in range(10)])
                 return
             payload = {"request": req, "analyst": (name or "analyst").strip(), "memory_on": memory_on,
                        "mode": agents or "c2"}
-            async for out in run_step(uuid.uuid4().hex[:8], payload, []):
+            async for out in run_step(uuid.uuid4().hex[:8], payload, [], [], payload["mode"]):
                 yield out
 
         async def resume_with(rid, decision):
             from langgraph.types import Command
             from analystdesk.agent.runtime import get_run
-            prior = _log_from_trace((await get_run(rid))["values"])
-            async for out in run_step(rid, Command(resume=decision), prior):
+            values = (await get_run(rid))["values"]
+            async for out in run_step(rid, Command(resume=decision), _log_from_trace(values),
+                                      values.get("trace", []), values.get("mode", "c1")):
                 yield out
 
         async def on_rerun_without_memory(rid, name):
@@ -379,7 +483,7 @@ def build_agent_tab():
             v = (await get_run((rid or "").strip()))["values"]
             if not v.get("request"):
                 yield (gr.update(), "### Load a run first, then re-run it without memory",
-                       *[gr.update() for _ in range(9)])
+                       *[gr.update() for _ in range(10)])
                 return
             async for out in on_start(v["request"], name, v.get("mode", "c1"), memory_on=False):
                 yield out
@@ -392,7 +496,7 @@ def build_agent_tab():
             try:
                 plan = json.loads(text)
             except ValueError as e:
-                yield (rid, f"### ⚠️ Plan JSON is invalid: {e}", *[gr.update() for _ in range(9)])
+                yield (rid, f"### ⚠️ Plan JSON is invalid: {e}", *[gr.update() for _ in range(10)])
                 return
             async for out in resume_with(rid, {"action": "edit", "plan": plan}):
                 yield out
