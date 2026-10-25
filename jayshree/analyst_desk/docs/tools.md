@@ -6,13 +6,13 @@ Every tool returns `ok` plus an `error` with a stable code instead of raising
 
 | Server | Tool | Read/Write | Agents allowed |
 |---|---|---|---|
-| filings-kb | `search_filings` | read | researcher, risk_diff |
-| filings-kb | `get_passage` | read | critic, researcher, risk_diff |
-| edgar | `list_filings` | read | planner |
-| edgar | `get_financials` | read | quant |
-| edgar | `get_fact` | read | critic, quant |
-| python-sandbox | `run_python` | read | quant |
-| research-portal | `get_past_notes` | read | risk_diff |
+| filings-kb | `search_filings` | read | researcher, risk_diff, single_agent |
+| filings-kb | `get_passage` | read | critic, researcher, risk_diff, single_agent |
+| edgar | `list_filings` | read | planner, single_agent |
+| edgar | `get_financials` | read | quant, single_agent |
+| edgar | `get_fact` | read | critic, quant, single_agent |
+| python-sandbox | `run_python` | read | quant, single_agent |
+| research-portal | `get_past_notes` | read | risk_diff, single_agent |
 | research-portal | `publish_note` | **WRITE** | publisher |
 
 ## filings-kb

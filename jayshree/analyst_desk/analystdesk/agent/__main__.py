@@ -6,6 +6,7 @@ from a new process — that is the stop-and-resume demo (L8). The app's
 Research Agent tab does the same through runtime.py.
 
     python -m analystdesk.agent start "Compare Microsoft and Alphabet operating margins 2022-2024"
+    python -m analystdesk.agent start "..." --team          # C2 team instead of C1
     python -m analystdesk.agent resume RUN_ID --approve                 # plan gate
     python -m analystdesk.agent resume RUN_ID --edit-plan plan.json
     python -m analystdesk.agent resume RUN_ID --approve --approver Jayshree   # note gate
@@ -64,6 +65,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="python -m analystdesk.agent")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start"); s.add_argument("request"); s.add_argument("--run-id")
+    s.add_argument("--team", action="store_true", help="C2 team instead of the C1 single agent")
+    s.add_argument("--no-memory", action="store_true")
     r = sub.add_parser("resume"); r.add_argument("run_id")
     g = r.add_mutually_exclusive_group(required=True)
     g.add_argument("--approve", action="store_true")
@@ -82,7 +85,9 @@ def main() -> None:
         return
     if args.cmd == "start":
         run_id = args.run_id or uuid.uuid4().hex[:8]
-        result = asyncio.run(run_until_gate(run_id, {"request": args.request}, _print))
+        payload = {"request": args.request, "mode": "c2" if args.team else "c1",
+                   "memory_on": not args.no_memory}
+        result = asyncio.run(run_until_gate(run_id, payload, _print))
     elif args.cmd == "resume":
         run_id = args.run_id
         if args.approve:

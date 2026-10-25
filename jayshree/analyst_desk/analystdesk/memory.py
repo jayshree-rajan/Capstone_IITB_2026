@@ -28,6 +28,7 @@ MEMORY_DB = Path(os.getenv("MEMORY_DB", ROOT / "data" / "memory" / "memory.sqlit
 
 _FACT = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)M\s*\[fact:\s*([A-Za-z]+)/(\d{4})/([\d-]+)\s*\]")
 _CALC = re.compile(r"(-?[\d.]+)%\s*\[calc:\s*([A-Za-z]+)/(\d{4})/([\d-]+)\s*/\s*[A-Za-z]+/\d{4}/[\d-]+\s*\]")
+_CALC_IDS = re.compile(r"\[calc:\s*([A-Za-z]+/\d{4}/[\d-]+)\s*/\s*([A-Za-z]+/\d{4}/[\d-]+)\s*\]")
 _METRIC = {
     "OperatingIncomeLoss": "operating_income",
     "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest":
@@ -162,9 +163,17 @@ def what_changed(ticker: str, previous: dict, current: dict) -> list[str]:
         label = metric.replace("_", " ")
         if p_year == c_year and abs(p["value"] - c["value"]) < 1e-9:
             lines.append(f"{label} FY{c_year}: unchanged since the last note at {c['text']}.")
+        elif p_year == c_year:
+            # same fiscal year, different value: the figure was restated, not a business change
+            lines.append(f"{label} FY{c_year}: the last note reported {p['text']}; the value now "
+                         f"reported is {c['text']}. Restated since the last note; this note uses "
+                         f"the current value.")
         elif metric == "margin":
-            lines.append(f"{label}: {p['text']} (FY{p_year}, last note) → {c['text']} (FY{c_year}), "
-                         f"{c['value'] - p['value']:+.2f} pp.")
+            # the move in percentage points, with a [diff] tag the checker verifies
+            ids_p, ids_c = _CALC_IDS.findall(p["text"]), _CALC_IDS.findall(c["text"])
+            move = (f"{c['value'] - p['value']:+.2f} pp [diff: {ids_c[0][0]} / {ids_c[0][1]} - "
+                    f"{ids_p[0][0]} / {ids_p[0][1]}]") if ids_p and ids_c else "moved"
+            lines.append(f"{label}: {p['text']} (FY{p_year}, last note) → {c['text']} (FY{c_year}), {move}.")
         else:
             lines.append(f"{label}: {p['text']} (FY{p_year}, last note) → {c['text']} (FY{c_year}).")
     return lines

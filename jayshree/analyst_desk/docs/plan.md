@@ -433,7 +433,7 @@ config.py                 # all prompts + model IDs in one versioned file
 | 3 | L7 | 4 FastMCP servers | ✅ 8 tools, tests, stdio verified; Docker sandbox built and attack-tested |
 | 4 | L8, L10 | C1 single agent + LangGraph | ✅ Graph, 2 human gates, self-correction, replan, SQLite resume; live run 14/14 verified |
 | 5 | L9 | Memory + policy | ✅ Store, trimming, policy, Memory panel; on vs off 3/3 vs 0/3 |
-| 6 | L11, L14 | C2 multi-agent + hooks + approval gate | — |
+| 6 | L11, L14 | C2 multi-agent + hooks + approval gate | ✅ Parallel team, typed hand-offs, hooks, critic (code + judge), in the app |
 | 7 | L12 | Reflexion + playbook | — |
 | 8 | L13 | Eval (60+ cases) + Grafana | — |
 | 9 | L15 | Security + red team | — |
@@ -454,6 +454,7 @@ config.py                 # all prompts + model IDs in one versioned file
 | 2026-10-24 | Jayshree (with Claude Code) | 2 | 10-K parser fixes (MA, MS, WFC, BAC, JPM, V); table-aware parsing + plain variant; retrieval switches; query decomposition; 36 labelled queries; Recall@5 ladder |
 | 2026-10-24 | Jayshree (with Claude Code) | 2 | C0 uses decomposed retrieval and the companies named in the question |
 | 2026-10-24 | Jayshree (with Claude Code) | 3+ | Docker Compose (app + MCP servers over HTTP, internal network), sandbox self-timeout |
+| 2026-10-25 | Jayshree (with Claude Code) | 6 | C2 team (parallel researchers, quant, risk-diff), typed hand-offs, hooks, compliance critic with judge; growth/diff figures; stricter quote check; automatic memory |
 | 2026-10-25 | Jayshree (with Claude Code) | 5 | Memory: LangGraph store (preferences, coverage, past-note memory), context trimming, memory policy, Memory panel, on/off comparison |
 | 2026-10-25 | Jayshree (with Claude Code) | 4 | C1 LangGraph agent: plan and note gates, ReAct research, replan, code checks, placeholder figures, SQLite resume |
 | 2026-10-24 | Jayshree (with Claude Code) | 3 | MCP servers (filings-kb, edgar, python-sandbox, research-portal); HMAC approval tokens; sandbox import guard + audit hooks + Dockerfile; agent tool permissions; tools.md |

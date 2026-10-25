@@ -19,6 +19,10 @@ SERVERS = {
 WRITE_TOOLS = {"publish_note"}
 
 AGENT_TOOLS = {
+    # C1: one agent with every research tool, still no write tool
+    "single_agent": {"search_filings", "get_passage", "list_filings", "get_financials",
+                     "get_fact", "run_python", "get_past_notes"},
+    # C2: the team, each with only what its job needs
     "planner":    {"list_filings"},
     "researcher": {"search_filings", "get_passage"},
     "quant":      {"get_financials", "get_fact", "run_python"},

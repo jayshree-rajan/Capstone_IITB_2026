@@ -4,15 +4,19 @@ Every number in a note must be traceable, in one of three ways:
 
   1. An XBRL fact, rendered by code from a placeholder (see figures.py):
          $245,122.0M [fact: RevenueFromContract.../2024/0000950170-24-087843]
-  2. A ratio of two facts:
+  2. A ratio, growth rate or margin change computed from facts:
          44.64% [calc: OperatingIncomeLoss/2024/... / RevenueFromContract.../2024/...]
+         15.67% [growth: Revenue.../2024/... / Revenue.../2023/...]       (A / B - 1) x 100
+         +2.87 pp [diff: OpInc/2024 / Rev/2024 - OpInc/2023 / Rev/2023]   (A/B - C/D) x 100
   3. A figure quoted from a filing: the same line cites the passage, e.g.
      [MSFT_2024_item7_017], and the number appears in that passage's text.
 
 check_note() verifies all three in code, not with an LLM (rule 1):
   * each [fact: ...] value equals the XBRL fact, in $ millions to 1 decimal;
   * each [calc: A / B] percentage equals A / B x 100, to 2 decimals;
-  * each quoted number really occurs in a passage cited on its line;
+  * each [growth: A / B] equals (A / B - 1) x 100 and each [diff: ...] the margin
+    change in percentage points;
+  * each quoted number occurs, with the same unit, in a passage cited on its line;
   * cited passages exist;
   * no investment-advice wording ("buy", "price target", ...).
 The issues it returns are fed back to the writer for a revision.
@@ -30,10 +34,14 @@ from ..servers.edgar_server import get_fact
 FACT_ID = r"[A-Za-z]+/\d{4}/\d{10}-\d{2}-\d{6}"
 FACT = re.compile(r"\$\s?([\d,]+(?:\.\d+)?)\s?([MB])\s*\[fact:\s*([^\]]+?)\s*\]")
 CALC = re.compile(rf"(-?[\d.]+)\s?%\s*\[calc:\s*({FACT_ID})\s*/\s*({FACT_ID})\s*\]")
+GROWTH = re.compile(rf"(-?[\d.]+)\s?%\s*\[growth:\s*({FACT_ID})\s*/\s*({FACT_ID})\s*\]")
+DIFF = re.compile(rf"([+-]?[\d.]+)\s?pp\s*\[diff:\s*({FACT_ID})\s*/\s*({FACT_ID})\s*-\s*"
+                  rf"({FACT_ID})\s*/\s*({FACT_ID})\s*\]")
 PASSAGE_ID = re.compile(r"\b([A-Z]{1,5}_\d{4}_item(?:1a|7)_\d{3})\b")
 # Any money amount or percentage, to catch numbers with no source
 MONEY = re.compile(r"\$\s?[\d,]+(?:\.\d+)?\s?(?:[MBK]\b|million|billion)?")
 PERCENT = re.compile(r"-?\d+(?:\.\d+)?\s?%")
+POINTS = re.compile(r"[+-]?\d+(?:\.\d+)?\s?(?:pp\b|percentage points?)")
 ADVICE = re.compile(
     r"\b(buy|sell|hold rating|overweight|underweight|outperform|underperform|"
     r"price target|we recommend|strong buy|investors should)\b", re.I)
@@ -63,13 +71,35 @@ def _digits(number: str) -> str:
     return re.sub(r"[^\d.]", "", number).strip(".")
 
 
+def _unit_pattern(number: str) -> str:
+    """What must follow (or precede) the digits in the passage: the same unit."""
+    n = number.lower()
+    if "%" in n:
+        return r"\s?(?:%|percent)"
+    if "pp" in n or "percentage point" in n:
+        return r"\s?(?:pp|percentage points?)"
+    if "billion" in n or re.search(r"\db\b", n):
+        return r"\s?(?:billion|b\b|bn\b)"
+    if "million" in n or re.search(r"\dm\b", n):
+        return r"\s?(?:million|m\b|mn\b)"
+    return ""
+
+
 def _quoted_in(number: str, text: str) -> bool:
+    """Does the passage contain this number with the same unit?
+
+    "5%" must appear as 5% (or 5 percent), "$2.2 billion" as 2.2 billion:
+    a bare digit somewhere in the passage does not count.
+    """
     d = _digits(number)
     if not d:
         return False
-    # match as a whole number in the passage, ignoring thousands separators
-    plain = re.sub(r"(?<=\d),(?=\d{3})", "", text)
-    return re.search(rf"(?<![\d.]){re.escape(d.replace(',', ''))}(?![\d])", plain) is not None
+    plain = re.sub(r"(?<=\d),(?=\d{3})", "", text)   # ignore thousands separators
+    digits = re.escape(d.replace(",", ""))
+    pattern = rf"(?<![\d.]){digits}(?![\d.]\d){_unit_pattern(number)}"
+    if "$" in number:
+        pattern = rf"\$\s?" + pattern
+    return re.search(pattern, plain, re.I) is not None
 
 
 def check_note(body: str, passage_exists=None, passage_text=None) -> CheckResult:
@@ -110,6 +140,28 @@ def check_note(body: str, passage_exists=None, passage_text=None) -> CheckResult
         else:
             verified += 1
 
+    for m in GROWTH.finditer(body):
+        total += 1
+        covered.append(m.span())
+        a, b = _fact_value(m.group(2), cache), _fact_value(m.group(3), cache)
+        if a is None or b in (None, 0):
+            issues.append(f"{m.group(1)}% cites an unknown fact in [growth: {m.group(2)} / {m.group(3)}].")
+        elif abs(float(m.group(1)) - round((a / b - 1) * 100, 2)) > 0.01:
+            issues.append(f"{m.group(1)}% growth is wrong: should be {(a / b - 1) * 100:.2f}%.")
+        else:
+            verified += 1
+
+    for m in DIFF.finditer(body):
+        total += 1
+        covered.append(m.span())
+        a, b, c, d = (_fact_value(m.group(i), cache) for i in (2, 3, 4, 5))
+        if None in (a, b, c, d) or 0 in (b, d):
+            issues.append(f"{m.group(1)} pp cites an unknown fact in its [diff: ...].")
+        elif abs(float(m.group(1)) - round((a / b - c / d) * 100, 2)) > 0.01:
+            issues.append(f"{m.group(1)} pp is wrong: should be {(a / b - c / d) * 100:+.2f} pp.")
+        else:
+            verified += 1
+
     def is_covered(span):
         return any(s <= span[0] and span[1] <= e for s, e in covered)
 
@@ -120,7 +172,7 @@ def check_note(body: str, passage_exists=None, passage_text=None) -> CheckResult
         end = body.find("\n", pos)
         return body[start:end if end != -1 else len(body)]
 
-    for pattern in (MONEY, PERCENT):
+    for pattern in (MONEY, PERCENT, POINTS):
         for m in pattern.finditer(body):
             if is_covered(m.span()):
                 continue

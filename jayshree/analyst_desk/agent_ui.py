@@ -28,7 +28,7 @@ EXAMPLES = [
     "How did NVIDIA's revenue and operating margin change from fiscal 2023 to 2024, and why?",
 ]
 
-_FACT_TAG = re.compile(r"\[(fact|calc):\s*([^\]]+?)\s*\]")
+_FACT_TAG = re.compile(r"\[(fact|calc|growth|diff):\s*([^\]]+?)\s*\]")
 
 
 # ── formatting ────────────────────────────────────────────────────────────────
@@ -73,13 +73,30 @@ def _event_line(ev: dict) -> str:
         mark = "✔" if ev["ok"] else "✖"
         preview = ev["preview"].replace("\n", " ")[:140]
         return f"&nbsp;&nbsp;&nbsp;{mark} `{ev['tool']}` → {preview}"
+    if n == "tool":   # hook event from a C2 specialist
+        mark = "✔" if ev["ok"] else ("⛔" if ev.get("denied") else "✖")
+        err = "" if ev["ok"] else f" **{ev.get('error')}**"
+        return (f"&nbsp;&nbsp;&nbsp;{mark} 👥 `{ev['agent']}` → `{ev['tool']}`"
+                f"({_args_short(ev.get('args', {}))}){err} · {ev.get('ms', 0)} ms")
+    if n == "handoff":
+        who = ev["agent"] + (f"[{ev['company']}]" if ev.get("company") else "")
+        return (f"📨 **Hand-off from {who}**: {ev['passages']} passages, {ev['facts']} facts, "
+                f"{ev['tool_calls']} tool calls, confidence **{ev['confidence']}**"
+                + (f", errors {', '.join(ev['errors'])}" if ev.get("errors") else ""))
+    if n == "gather":
+        return f"🧩 **Research lead** gathered {ev['handoffs']} hand-offs"
     if n == "replan":
         return f"🔁 **Replanning** — a tool result contradicted the plan: {ev['reason'][:160]}"
     if n == "write":
         return f"✍️ **Writer** drafted the note" + (f" (revision {ev['revision']})" if ev["revision"] else "")
-    if n == "check":
-        return (f"🔎 **Code check** — {ev['verified']}/{ev['total']} numbers verified"
-                + ("" if ev["ok"] else f", {len(ev['issues'])} issue(s) sent back"))
+    if n in ("check", "critic"):
+        line = (f"🔎 **{'Compliance critic' if n == 'critic' else 'Code check'}** — "
+                f"{ev['verified']}/{ev['total']} numbers verified")
+        claims = ev.get("claims") or {}
+        if claims.get("checked"):
+            line += (f"; judge ({claims.get('model', '').split('/')[-1]}) found "
+                     f"{claims.get('supported')}/{claims['checked']} claims supported")
+        return line + ("" if ev["ok"] else f", {len(ev['issues'])} issue(s) sent back")
     if n == "review_note":
         return f"👤 **Note {ev['action']}{'d' if ev['action'] != 'edit' else 'ed'}** by the analyst"
     if n == "publish":
@@ -104,7 +121,8 @@ def _note_display(body: str) -> str:
 
     text = _FACT_TAG.sub(repl, body)
     if sources:
-        text += "\n\n---\n**Sources** (XBRL facts; `calc` = numerator / denominator, computed in code)\n\n"
+        text += ("\n\n---\n**Sources** (XBRL facts; computed in code: `calc` = A / B, "
+                 "`growth` = A / B − 1, `diff` = margin change in percentage points)\n\n")
         text += "\n".join(f"{i}. {s}" for i, s in enumerate(sources, 1))
     return text
 
@@ -112,6 +130,12 @@ def _note_display(body: str) -> str:
 def _check_display(c: dict) -> str:
     head = (f"### {'✅' if c['ok'] else '⚠️'} Code check: {c['verified']}/{c['total']} numbers "
             f"verified ({c['verified_share']}%)")
+    claims = c.get("claims") or {}
+    if claims.get("checked"):
+        head += (f"\n**Judge** ({claims.get('model')}): {claims.get('supported')}/{claims['checked']} "
+                 "cited claims supported by their passages")
+    elif claims.get("error"):
+        head += f"\n**Judge**: {claims['error']}"
     if c["issues"]:
         head += "\n\nIssues (the analyst decides whether to edit or reject):\n" + "\n".join(
             f"- {i}" for i in c["issues"])
@@ -207,25 +231,28 @@ def _log_from_trace(values: dict) -> list[str]:
 def build_agent_tab():
     with gr.Tab("🤖 Research Agent"):
         gr.Markdown(
-            "**C1 agent** — one LangGraph agent using all MCP tools. It plans, waits for your "
-            "approval, researches with tools (every call is shown live), writes a note whose "
-            "numbers are inserted and checked by code, and publishes **only after you approve "
-            "the exact note**. Each run has an id: load it later to resume."
+            "Research agents over the MCP tools. They plan, wait for your approval, research with "
+            "tools (every call is shown live), write a note whose numbers are inserted and checked "
+            "by code, and publish **only after you approve the exact note**. **C1** is one agent "
+            "with all tools; **C2** is a team: parallel researchers, a quant, risk-diff agents and "
+            "a compliance critic. Memory is used automatically for your own coverage."
         )
         with gr.Row():
             request = gr.Textbox(label="Research request", scale=5,
                                  placeholder="e.g. Compare Microsoft and Alphabet operating margins 2022-2024")
+            mode = gr.Radio([("C1 · single agent", "c1"), ("C2 · team", "c2")], value="c2",
+                            label="Agents", scale=2)
             start_btn = gr.Button("▶ Start", variant="primary", scale=1)
         gr.Examples([[e] for e in EXAMPLES], inputs=request)
         with gr.Row():
             run_id = gr.Textbox(label="Run id (paste one to resume)", scale=2)
             load_btn = gr.Button("⟳ Load run", scale=1)
             approver = gr.Textbox(label="Your name (approvals, preferences)", value="analyst", scale=2)
-            use_memory = gr.Checkbox(label="🧠 Use memory", value=True, scale=1,
-                                     info="Off = same agent without preferences or past notes")
+            rerun_btn = gr.Button("↻ Re-run this request without memory", scale=2)
         with gr.Accordion("📂 Your runs: click a row to load it", open=True):
             runs_table = gr.Dataframe(
-                headers=["run id", "updated (UTC)", "status", "numbers verified", "tool calls", "request"],
+                headers=["run id", "agents", "updated (UTC)", "status", "numbers verified", "tool calls",
+                         "request"],
                 interactive=False, wrap=True, max_height=260)
             refresh_runs_btn = gr.Button("↻ Refresh list", size="sm")
         status = gr.Markdown("### Enter a request and press Start, or pick a run above")
@@ -330,11 +357,12 @@ def build_agent_tab():
                 await ltm.forget(tuple(sel[:2]), sel[2])
             return (None, "_Deleted._" if sel else "_Nothing selected_", *await memory_tables(name))
 
-        async def on_start(req, name, use_mem):
+        async def on_start(req, name, agents, memory_on=True):
             if not req.strip():
                 yield (gr.update(), "### Please enter a request", *[gr.update() for _ in range(9)])
                 return
-            payload = {"request": req, "analyst": (name or "analyst").strip(), "memory_on": bool(use_mem)}
+            payload = {"request": req, "analyst": (name or "analyst").strip(), "memory_on": memory_on,
+                       "mode": agents or "c2"}
             async for out in run_step(uuid.uuid4().hex[:8], payload, []):
                 yield out
 
@@ -343,6 +371,17 @@ def build_agent_tab():
             from analystdesk.agent.runtime import get_run
             prior = _log_from_trace((await get_run(rid))["values"])
             async for out in run_step(rid, Command(resume=decision), prior):
+                yield out
+
+        async def on_rerun_without_memory(rid, name):
+            """Same request and agents as the loaded run, as a new run with memory off."""
+            from analystdesk.agent.runtime import get_run
+            v = (await get_run((rid or "").strip()))["values"]
+            if not v.get("request"):
+                yield (gr.update(), "### Load a run first, then re-run it without memory",
+                       *[gr.update() for _ in range(9)])
+                return
+            async for out in on_start(v["request"], name, v.get("mode", "c1"), memory_on=False):
                 yield out
 
         async def on_approve_plan(rid):
@@ -378,7 +417,7 @@ def build_agent_tab():
 
         async def refresh_runs():
             from analystdesk.agent.runtime import list_runs
-            return [[r["run_id"], r["updated"], r["status"], r["check"], r["tool_calls"], r["request"]]
+            return [[r["run_id"], r["mode"], r["updated"], r["status"], r["check"], r["tool_calls"], r["request"]]
                     for r in await list_runs()]
 
         async def on_pick_run(table, evt: gr.SelectData):
@@ -388,8 +427,9 @@ def build_agent_tab():
 
         # every action refreshes the runs list afterwards
         for trigger, fn, inputs in (
-                (start_btn.click, on_start, [request, approver, use_memory]),
-                (request.submit, on_start, [request, approver, use_memory]),
+                (start_btn.click, on_start, [request, approver, mode]),
+                (request.submit, on_start, [request, approver, mode]),
+                (rerun_btn.click, on_rerun_without_memory, [run_id, approver]),
                 (approve_plan_btn.click, on_approve_plan, [run_id]),
                 (edit_plan_btn.click, on_edit_plan, [run_id, plan_json]),
                 (approve_note_btn.click, on_approve_note, [run_id, approver]),

@@ -14,9 +14,12 @@
 * Replanning: a tool result that contradicts the plan sends it back to the
   planner, and the analyst sees the revised plan.
 * ReAct inside research: think → call a tool → observe → repeat, within a
-  tool-call and token budget.
+  tool-call and token budget. Every tool call passes through the hooks.
 * A persistent checkpointer (SQLite) saves state after every step, so a run
   can be stopped at any gate and resumed later from a new process.
+
+The nodes shared with the C2 team (guard, plan, gates, writer, checks,
+publish) are built by common_nodes() and reused by team.py.
 
 The model proposes; code decides numbers and checks; a person approves.
 """
@@ -26,7 +29,8 @@ from __future__ import annotations
 import json
 import operator
 import os
-from typing import Annotated, Any, Literal, TypedDict
+import re
+from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
@@ -41,12 +45,15 @@ from ..scope import COMPANIES
 from ..servers.common import COVERED_YEARS
 from .checks import ADVICE, check_note
 from .figures import build_figures, figures_table, render
+from .hooks import Hooks, wrap_for_toolnode
 
 MAX_TOOL_CALLS = int(os.getenv("AGENT_MAX_TOOL_CALLS", "24"))
 TOKEN_BUDGET = int(os.getenv("AGENT_TOKEN_BUDGET", "120000"))
+MAX_CONTEXT_CHARS = int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "60000"))
 MAX_REVISIONS = 2
 MAX_REPLANS = 1
 _TICKERS = {c.ticker for c in COMPANIES}
+_ASKS_FOR_CHANGES = re.compile(r"last note|previous note|since our|what changed", re.I)
 
 
 # ── state ─────────────────────────────────────────────────────────────────────
@@ -66,18 +73,20 @@ class Draft(BaseModel):
 
 class AgentState(TypedDict, total=False):
     request: str
+    mode: str                         # "c1" single agent | "c2" team
     guard: dict
     plan: dict
     plan_feedback: str
     replans: int
-    messages: Annotated[list, add_messages]
-    tool_calls: int
-    tokens: int
+    messages: Annotated[list, add_messages]          # C1 research conversation
+    handoffs: Annotated[list, operator.add]          # C2 specialists' typed hand-offs
+    tool_calls: Annotated[int, operator.add]         # increments, so parallel agents add up
+    tokens: Annotated[int, operator.add]
     draft: dict
     render_issues: list
     check: dict
     revisions: int
-    outcome: str                      # published | rejected | out_of_scope | publish_failed
+    outcome: str                      # approved | published | rejected | publish_failed
     published: dict
     analyst: str
     memory_on: bool
@@ -87,6 +96,11 @@ class AgentState(TypedDict, total=False):
 
 def _event(node: str, **info) -> list[dict]:
     return [{"node": node, **info}]
+
+
+def usage(msg) -> int:
+    meta = getattr(msg, "usage_metadata", None) or {}
+    return int(meta.get("total_tokens", 0))
 
 
 def tool_json(raw) -> dict:
@@ -109,6 +123,28 @@ def tool_json(raw) -> dict:
         else:
             return {}
     return data if isinstance(data, dict) else {}
+
+
+def trim_context(msgs: list, max_chars: int = MAX_CONTEXT_CHARS) -> list:
+    """Short-term memory (L9): keep the system prompt, the request and the most
+    recent tool rounds within a size budget. The cut always lands on an AI
+    message, so no tool result is left without the call that asked for it."""
+    def size(m):
+        return len(m.content if isinstance(m.content, str) else json.dumps(m.content))
+    if sum(size(m) for m in msgs) <= max_chars or len(msgs) <= 3:
+        return msgs
+    head, rest = msgs[:2], msgs[2:]
+    budget = max_chars - sum(size(m) for m in head)
+    keep_from = len(rest)
+    for i in range(len(rest) - 1, -1, -1):
+        budget -= size(rest[i])
+        if budget < 0:
+            break
+        if isinstance(rest[i], AIMessage):
+            keep_from = i
+    note = HumanMessage(f"[{keep_from} earlier messages trimmed to fit the context budget; "
+                        "rely on your notes of their results so far.]")
+    return head + [note] + rest[keep_from:]
 
 
 # ── prompts (L3: role, context, task, constraints, format, examples) ─────────
@@ -146,8 +182,11 @@ TASK: Draft the note following the outline.
 CONSTRAINTS (checked by code; violations are sent back to you):
 - For any figure in the KEY FIGURES table, write its placeholder exactly, e.g. {{MSFT_2024_margin}}. \
 Never type those numbers yourself: code inserts the exact value and its source.
-- Any other number (growth rates, segment figures) must be quoted exactly as it appears in a \
-filing passage, and that passage id must be cited on the same line, e.g. [MSFT_2024_item7_017].
+- For growth rates and margin changes use the KEY FIGURES placeholders too \
+({{MSFT_2024_revenue_growth}}, {{MSFT_2024_margin_change}}); never compute or type your own.
+- Any other number (e.g. segment figures) must be quoted exactly as it appears in a filing \
+passage, with its unit, and that passage id must be cited on the same line, e.g. [MSFT_2024_item7_017].
+- Never use a number that is in neither the KEY FIGURES nor a cited passage.
 - Every claim from a filing cites its passage id in brackets.
 - No buy/sell/hold, price targets or other investment advice.
 - If a WHAT CHANGED block is given below, add a section "What changed since our last note" \
@@ -163,42 +202,14 @@ KEY FIGURES:
 {issues}"""
 
 
-# ── graph ─────────────────────────────────────────────────────────────────────
+# ── nodes shared by C1 and C2 ─────────────────────────────────────────────────
 
-MAX_CONTEXT_CHARS = int(os.getenv("AGENT_MAX_CONTEXT_CHARS", "60000"))
+def common_nodes(llm, publish_tool, passage_text=None, critic=None) -> dict:
+    """Guard, plan, plan gate, writer, check (+ optional critic), note gate, publish.
 
-
-def trim_context(msgs: list, max_chars: int = MAX_CONTEXT_CHARS) -> list:
-    """Short-term memory (L9): keep the system prompt, the request and the most
-    recent tool rounds within a size budget. The cut always lands on an AI
-    message, so no tool result is left without the call that asked for it."""
-    def size(m):
-        return len(m.content if isinstance(m.content, str) else json.dumps(m.content))
-    if sum(size(m) for m in msgs) <= max_chars or len(msgs) <= 3:
-        return msgs
-    head, rest = msgs[:2], msgs[2:]
-    budget = max_chars - sum(size(m) for m in head)
-    keep_from = len(rest)
-    for i in range(len(rest) - 1, -1, -1):
-        budget -= size(rest[i])
-        if budget < 0:
-            break
-        if isinstance(rest[i], AIMessage):
-            keep_from = i
-    note = HumanMessage(f"[{keep_from} earlier messages trimmed to fit the context budget; "
-                        "rely on your notes of their results so far.]")
-    return head + [note] + rest[keep_from:]
-
-
-def build_graph(llm, tools: list, publish_tool, passage_text=None):
-    """Assemble the C1 graph. tools: the research tools (no write tool);
-    publish_tool: publish_note, used only by the publish node after approval."""
-    tool_node = ToolNode(tools)
-    research_llm = llm.bind_tools(tools)
-
-    def _usage(msg) -> int:
-        meta = getattr(msg, "usage_metadata", None) or {}
-        return int(meta.get("total_tokens", 0))
+    critic: async fn(draft_body) -> {"issues": [...], ...} run after the code
+    checks (the C2 compliance critic's judge); None for C1.
+    """
 
     # 1. scope check in code: covered companies, no advice requests
     def input_guard(state: AgentState):
@@ -213,7 +224,9 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
         elif ADVICE.search(req):
             reason = "Requests for investment advice (buy/sell/price targets) are out of scope."
         guard = {"ok": reason is None, "reason": reason, "companies": companies, "years": years}
-        return {"guard": guard, "replans": 0, "revisions": 0, "tool_calls": 0, "tokens": 0,
+        # evaluation runs never use memory, so results stay reproducible
+        memory_on = state.get("memory_on", True) and os.getenv("AGENT_EVAL") != "1"
+        return {"guard": guard, "replans": 0, "revisions": 0, "memory_on": memory_on,
                 "trace": _event("input_guard", **guard)}
 
     def after_guard(state) -> Literal["plan", "__end__"]:
@@ -244,8 +257,7 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
         # code, not the model, enforces coverage
         p.companies = [c.upper() for c in p.companies if c.upper() in _TICKERS] or state["guard"]["companies"]
         p.fiscal_years = [y for y in p.fiscal_years if y in COVERED_YEARS] or list(COVERED_YEARS)
-        return {"plan": p.model_dump(), "plan_feedback": "", "memory": mem,
-                "tokens": state.get("tokens", 0) + _usage(result["raw"]),
+        return {"plan": p.model_dump(), "plan_feedback": "", "memory": mem, "tokens": usage(result["raw"]),
                 "trace": _event("plan", plan=p.model_dump(), replan=bool(state.get("plan_feedback")),
                                 memory_used={"preferences": len(mem.get("preferences", [])),
                                              "previous_notes": sorted(mem.get("previous_notes", {}))})}
@@ -262,72 +274,50 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
                                             + json.dumps(out.get("plan", state["plan"]), indent=1))]
         return out
 
-    # 4. ReAct research loop
-    async def research(state: AgentState):
-        msgs = state.get("messages") or []
-        if not msgs:
-            msgs = [SystemMessage(RESEARCHER.format(plan=json.dumps(state["plan"], indent=1),
-                                                    budget=MAX_TOOL_CALLS)),
-                    HumanMessage(state["request"])]
-            new = msgs
-        else:
-            new = []
-        reply = await research_llm.ainvoke(trim_context(msgs))
-        calls = len(getattr(reply, "tool_calls", []) or [])
-        return {"messages": new + [reply], "tool_calls": state.get("tool_calls", 0) + calls,
-                "tokens": state.get("tokens", 0) + _usage(reply),
-                "trace": _event("research", tool_calls=[{"name": c["name"], "args": c["args"]}
-                                                       for c in reply.tool_calls] if calls else [])}
-
-    def after_research(state) -> Literal["tools", "write"]:
-        last = state["messages"][-1]
-        over = state.get("tool_calls", 0) > MAX_TOOL_CALLS or state.get("tokens", 0) > TOKEN_BUDGET
-        return "tools" if getattr(last, "tool_calls", None) and not over else "write"
-
-    def after_tools(state) -> Literal["replan", "research"]:
-        # results of the latest tool step
-        recent = []
-        for m in reversed(state["messages"]):
-            if not isinstance(m, ToolMessage):
-                break
-            recent.append(str(m.content))
-        contradiction = next((c for c in recent if "NOT_IN_COVERAGE" in c), None)
-        if contradiction and state.get("replans", 0) < MAX_REPLANS:
-            return "replan"
-        return "research"
-
-    def replan(state: AgentState):
-        recent = [str(m.content)[:300] for m in state["messages"][-4:] if isinstance(m, ToolMessage)]
-        feedback = "A tool reported data outside coverage: " + " | ".join(recent)
-        return {"plan_feedback": feedback, "replans": state.get("replans", 0) + 1,
-                "trace": _event("replan", reason=feedback[:300])}
-
-    # 5. writer
-    async def write(state: AgentState):
-        findings = "\n".join(
+    # 5. writer — from the C1 conversation or the C2 hand-offs
+    def _findings(state) -> str:
+        if state.get("handoffs"):
+            latest = max(h.get("round", 0) for h in state["handoffs"])   # after a replan, the new round only
+            return "\n\n".join(
+                f"[{h['agent']}{'/' + h['company'] if h.get('company') else ''}] "
+                f"(confidence {h['confidence']}; passages {', '.join(h['passage_ids'][:12])}; "
+                f"facts {len(h['fact_ids'])})\n{h['findings']}"
+                for h in state["handoffs"] if h.get("round", 0) == latest)
+        return "\n".join(
             f"[{type(m).__name__}] {m.content if isinstance(m.content, str) else json.dumps(m.content)}"[:2500]
-            for m in state.get("messages", [])
-            if isinstance(m, (ToolMessage, AIMessage)) and m.content)
-        issues = state.get("check", {}).get("issues") if state.get("revisions") else None
-        figures = build_figures(state["plan"]["companies"], state["plan"]["fiscal_years"])
+            for m in state.get("messages", []) if isinstance(m, (ToolMessage, AIMessage)) and m.content)
+
+    def _changes(state, figures) -> str:
+        """The 'what changed since our last note' lines, computed by code."""
         mem = state.get("memory") or {}
-        changed = ""
+        lines = []
         if mem.get("previous_notes"):
             from ..memory import figures_from_note, what_changed
             current = figures_from_note(" ".join(f["text"] for f in figures.values()))
-            changed = "\n".join(f"- {line}" for t, n in mem["previous_notes"].items()
-                                 for line in what_changed(t, n, current.get(t, {})))
+            lines = [line for t, n in mem["previous_notes"].items()
+                     for line in what_changed(t, n, current.get(t, {}))]
+        if state.get("memory_on", True) and _ASKS_FOR_CHANGES.search(state["request"]):
+            missing = [t for t in state["plan"]["companies"] if t not in mem.get("previous_notes", {})]
+            lines += [f"No previous note on {t} in memory, so there is nothing to compare against." for t in missing]
+        return "\n".join(f"- {ln}" for ln in lines)
+
+    async def write(state: AgentState):
+        issues = state.get("check", {}).get("issues") if state.get("revisions") else None
+        figures = build_figures(state["plan"]["companies"], state["plan"]["fiscal_years"])
+        mem = state.get("memory") or {}
+        changed = _changes(state, figures)
         memory_block = ""
         if mem.get("preferences"):
             memory_block += "\nANALYST PREFERENCES:\n- " + "\n- ".join(mem["preferences"])
         if changed:
             memory_block += "\nWHAT CHANGED (code-computed; use the placeholder {WHAT_CHANGED}):\n" + changed
-        prompt = WRITER.format(figures=figures_table(figures), memory=memory_block, issues=("FIX THESE ISSUES FROM THE CHECKER:\n- " + "\n- ".join(issues))
+        prompt = WRITER.format(figures=figures_table(figures), memory=memory_block,
+                               issues=("FIX THESE ISSUES FROM THE CHECKER:\n- " + "\n- ".join(issues))
                                if issues else "")
         result = await llm.with_structured_output(Draft, include_raw=True).ainvoke([
             SystemMessage(prompt),
             HumanMessage(f"REQUEST: {state['request']}\nPLAN: {json.dumps(state['plan'])}\n"
-                         f"FINDINGS:\n{findings[-60000:]}")])
+                         f"FINDINGS:\n{_findings(state)[-60000:]}")])
         d: Draft = result["parsed"]
         d.body, render_issues = render(d.body, figures)   # code inserts every key figure
         if changed:   # code inserts the comparison with the last note
@@ -335,16 +325,24 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
                 d.body = d.body.replace("{WHAT_CHANGED}", changed)
             else:
                 d.body += "\n\n## What changed since our last note\n" + changed
-        return {"draft": d.model_dump(), "render_issues": render_issues, "tokens": state.get("tokens", 0) + _usage(result["raw"]),
+        return {"draft": d.model_dump(), "render_issues": render_issues, "tokens": usage(result["raw"]),
                 "trace": _event("write", revision=state.get("revisions", 0))}
 
-    # 6. code checks every number and citation (self-correction)
-    def check(state: AgentState):
+    # 6. code checks every number and citation; C2 adds the critic's judge
+    async def check(state: AgentState):
         r = check_note(state["draft"]["body"], passage_text=passage_text)
         issues = (state.get("render_issues") or []) + r.issues
         result = {"ok": not issues, "issues": issues, "verified": r.verified_numbers,
                   "total": r.total_numbers, "verified_share": r.verified_share}
-        return {"check": result, "trace": _event("check", **result)}
+        tokens = 0
+        if critic is not None:
+            judged = await critic(state["draft"]["body"])
+            tokens = judged.pop("tokens", 0)
+            result["issues"] = issues + judged["issues"]
+            result["ok"] = not result["issues"]
+            result["claims"] = judged
+        return {"check": result, "tokens": tokens,
+                "trace": _event("critic" if critic else "check", **result)}
 
     def after_check(state) -> Literal["write", "review_note"]:
         if not state["check"]["ok"] and state.get("revisions", 0) < MAX_REVISIONS:
@@ -396,29 +394,86 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
                 "trace": _event("publish", ok=ok, note_id=result.get("note_id"), remembered=remembered,
                                 error=(result.get("error") or {}).get("message"))}
 
+    return dict(input_guard=input_guard, after_guard=after_guard, plan=plan, review_plan=review_plan,
+                write=write, check=check, after_check=after_check, count_revision=count_revision,
+                review_note=review_note, after_review=after_review, publish=publish)
+
+
+def add_common_tail(g: StateGraph, n: dict) -> None:
+    """write → check ⟲ → review_note → publish, shared by C1 and C2."""
+    g.add_node("write", n["write"])
+    g.add_node("check", n["check"])
+    g.add_node("count_revision", n["count_revision"])
+    g.add_node("review_note", n["review_note"])
+    g.add_node("publish", n["publish"])
+    g.add_edge("write", "check")
+    g.add_conditional_edges("check", n["after_check"], {"write": "count_revision", "review_note": "review_note"})
+    g.add_edge("count_revision", "write")
+    g.add_conditional_edges("review_note", n["after_review"])
+    g.add_edge("publish", END)
+
+
+# ── C1 ────────────────────────────────────────────────────────────────────────
+
+def build_graph(llm, tools: list, publish_tool, passage_text=None, hooks: Hooks | None = None):
+    """Assemble the C1 graph. tools: the research tools (no write tool);
+    publish_tool: publish_note, used only by the publish node after approval."""
+    hooks = hooks or Hooks(max_calls_per_agent=MAX_TOOL_CALLS)
+    tool_node = ToolNode(tools, awrap_tool_call=wrap_for_toolnode(hooks, "single_agent"))
+    research_llm = llm.bind_tools(tools)
+    n = common_nodes(llm, publish_tool, passage_text)
+
+    # 4. ReAct research loop
+    async def research(state: AgentState):
+        msgs = state.get("messages") or []
+        if not msgs:
+            msgs = [SystemMessage(RESEARCHER.format(plan=json.dumps(state["plan"], indent=1),
+                                                    budget=MAX_TOOL_CALLS)),
+                    HumanMessage(state["request"])]
+            new = msgs
+        else:
+            new = []
+        reply = await research_llm.ainvoke(trim_context(msgs))
+        calls = len(getattr(reply, "tool_calls", []) or [])
+        return {"messages": new + [reply], "tool_calls": calls, "tokens": usage(reply),
+                "trace": _event("research", tool_calls=[{"name": c["name"], "args": c["args"]}
+                                                       for c in reply.tool_calls] if calls else [])}
+
+    def after_research(state) -> Literal["tools", "write"]:
+        last = state["messages"][-1]
+        over = state.get("tool_calls", 0) > MAX_TOOL_CALLS or state.get("tokens", 0) > TOKEN_BUDGET
+        return "tools" if getattr(last, "tool_calls", None) and not over else "write"
+
+    def after_tools(state) -> Literal["replan", "research"]:
+        recent = []
+        for m in reversed(state["messages"]):
+            if not isinstance(m, ToolMessage):
+                break
+            recent.append(str(m.content))
+        contradiction = next((c for c in recent if "NOT_IN_COVERAGE" in c), None)
+        if contradiction and state.get("replans", 0) < MAX_REPLANS:
+            return "replan"
+        return "research"
+
+    def replan(state: AgentState):
+        recent = [str(m.content)[:300] for m in state["messages"][-4:] if isinstance(m, ToolMessage)]
+        feedback = "A tool reported data outside coverage: " + " | ".join(recent)
+        return {"plan_feedback": feedback, "replans": state.get("replans", 0) + 1,
+                "trace": _event("replan", reason=feedback[:300])}
+
     g = StateGraph(AgentState)
-    g.add_node("input_guard", input_guard)
-    g.add_node("plan", plan)
-    g.add_node("review_plan", review_plan)
+    g.add_node("input_guard", n["input_guard"])
+    g.add_node("plan", n["plan"])
+    g.add_node("review_plan", n["review_plan"])
     g.add_node("research", research)
     g.add_node("tools", tool_node)
     g.add_node("replan", replan)
-    g.add_node("write", write)
-    g.add_node("check", check)
-    g.add_node("count_revision", count_revision)
-    g.add_node("review_note", review_note)
-    g.add_node("publish", publish)
-
     g.add_edge(START, "input_guard")
-    g.add_conditional_edges("input_guard", after_guard)
+    g.add_conditional_edges("input_guard", n["after_guard"])
     g.add_edge("plan", "review_plan")
     g.add_edge("review_plan", "research")
     g.add_conditional_edges("research", after_research)
     g.add_conditional_edges("tools", after_tools)
     g.add_edge("replan", "plan")
-    g.add_edge("write", "check")
-    g.add_conditional_edges("check", after_check, {"write": "count_revision", "review_note": "review_note"})
-    g.add_edge("count_revision", "write")
-    g.add_conditional_edges("review_note", after_review)
-    g.add_edge("publish", END)
+    add_common_tail(g, n)
     return g

@@ -87,34 +87,62 @@ def _tool_events(value: dict) -> list[Event]:
 
 async def run_until_gate(run_id: str, payload, on_event: Callable[[Event], Awaitable[None]] | None = None,
                          transport: str = "auto") -> dict:
-    """Run from a request or Command(resume=...) to the next gate or the end."""
+    """Run from a request or Command(resume=...) to the next gate or the end.
+
+    A new run's payload may set "mode": "c1" (single agent, default) or "c2"
+    (team). A resumed run keeps the mode it was started with.
+    """
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    from .graph import build_graph
     CHECKPOINTS.parent.mkdir(parents=True, exist_ok=True)
     async with open_tools(transport) as tools, AsyncSqliteSaver.from_conn_string(str(CHECKPOINTS)) as saver:
+        if isinstance(payload, dict):
+            payload = {**payload, "mode": payload.get("mode", "c1")}
+            mode = payload["mode"]
+        else:
+            mode = await _mode_of(saver, run_id)
         research = [t for t in tools if t.name in RESEARCH_TOOLS]
         publish = next(t for t in tools if t.name == "publish_note")
-        graph = build_graph(make_llm(), research, publish, passage_text).compile(checkpointer=saver)
-        config = {"configurable": {"thread_id": run_id}, "recursion_limit": 100}
-        async for update in graph.astream(payload, config, stream_mode="updates"):
-            for node, value in update.items():
-                if node == "__interrupt__":
-                    continue
-                events = _tool_events(value) if node == "tools" else (value or {}).get("trace", [])
-                for ev in events:
-                    if on_event:
-                        await on_event(ev)
+        graph = _build(mode, make_llm(), research, publish, passage_text, live=True).compile(checkpointer=saver)
+        config = {"configurable": {"thread_id": run_id}, "recursion_limit": 150}
+        async for kind, chunk in graph.astream(payload, config, stream_mode=["updates", "custom"]):
+            if kind == "custom":      # live tool events from the C2 specialists
+                events = [chunk]
+            else:
+                events = []
+                for node, value in chunk.items():
+                    if node == "__interrupt__":
+                        continue
+                    events += _tool_events(value) if node == "tools" else (value or {}).get("trace", [])
+            for ev in events:
+                if on_event:
+                    await on_event(ev)
         return await _snapshot(graph, config)
+
+
+def _build(mode: str, llm, research, publish, passage_text_fn, live: bool = False):
+    if mode == "c2":
+        from .team import build_team_graph, make_judge_llm
+        return build_team_graph(llm, research, publish, passage_text_fn,
+                                judge_llm=make_judge_llm() if live else None)
+    from .graph import build_graph
+    return build_graph(llm, research, publish, passage_text_fn)
+
+
+async def _mode_of(saver, run_id: str) -> str:
+    """The mode a saved run was started with (c1 for runs from before C2 existed)."""
+    tup = await saver.aget_tuple({"configurable": {"thread_id": run_id}})
+    if tup is None:
+        return "c1"
+    return (tup.checkpoint.get("channel_values") or {}).get("mode") or "c1"
 
 
 async def get_run(run_id: str) -> dict:
     """Current state of a saved run, without calling any model or tool."""
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    from .graph import build_graph
     if not CHECKPOINTS.exists():
         return {"values": {}, "interrupts": [], "next": []}
     async with AsyncSqliteSaver.from_conn_string(str(CHECKPOINTS)) as saver:
-        graph = build_graph(_NoModel(), [], None).compile(checkpointer=saver)
+        graph = _build(await _mode_of(saver, run_id), _NoModel(), [], None, None).compile(checkpointer=saver)
         return await _snapshot(graph, {"configurable": {"thread_id": run_id}})
 
 
@@ -133,7 +161,6 @@ async def list_runs(limit: int = 50) -> list[dict]:
     """Every saved run, newest first: id, when, request, status, tools, check."""
     import sqlite3
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-    from .graph import build_graph
     if not CHECKPOINTS.exists():
         return []
     con = sqlite3.connect(f"file:{CHECKPOINTS}?mode=ro", uri=True)
@@ -145,14 +172,16 @@ async def list_runs(limit: int = 50) -> list[dict]:
         con.close()
     runs = []
     async with AsyncSqliteSaver.from_conn_string(str(CHECKPOINTS)) as saver:
-        graph = build_graph(_NoModel(), [], None).compile(checkpointer=saver)
         for rid in ids:
+            mode = await _mode_of(saver, rid)
+            graph = _build(mode, _NoModel(), [], None, None).compile(checkpointer=saver)
             config = {"configurable": {"thread_id": rid}}
             snap = await graph.aget_state(config)
             s = {"values": snap.values, "interrupts": [i.value for t in snap.tasks for i in t.interrupts]}
             check = snap.values.get("check") or {}
             runs.append({
                 "run_id": rid,
+                "mode": "C2 team" if mode == "c2" else "C1 single",
                 "updated": (snap.created_at or "")[:16].replace("T", " "),
                 "request": snap.values.get("request", ""),
                 "status": _status(s),

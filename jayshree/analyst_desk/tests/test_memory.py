@@ -47,16 +47,26 @@ class MemoryTests(TempMemory):
         self.assertEqual(asyncio.run(memory.preferences("desk")), [])
 
     def test_what_changed_is_computed_by_code(self):
-        previous = {"note_id": 1, "title": "old", "published_at": "2026-10-25T00:00:00",
-                    "figures": {"margin_2023": {"value": 41.77, "unit": "%", "text": "41.77% [calc: ...]"}}}
+        prev_fig = memory.figures_from_note(" ".join(
+            v["text"] for v in build_figures(["MSFT"], [2023]).values()))["MSFT"]
+        previous = {"note_id": 1, "title": "old", "published_at": "2026-10-25T00:00:00", "figures": prev_fig}
         current = memory.figures_from_note(NOTE)["MSFT"]
         lines = memory.what_changed("MSFT", previous, current)
-        self.assertTrue(any("+2.87 pp" in l for l in lines), lines)
+        self.assertTrue(any("+2.87 pp [diff:" in l for l in lines), lines)
+        from analystdesk.agent.checks import check_note
+        self.assertTrue(check_note("\n".join(lines)).ok)   # the computed lines pass the checker
 
     def test_unchanged_when_same_year_and_value(self):
         current = memory.figures_from_note(NOTE)["MSFT"]
         previous = {"note_id": 1, "title": "t", "published_at": "2026-10-25", "figures": current}
         self.assertTrue(any("unchanged" in l for l in memory.what_changed("MSFT", previous, current)))
+
+    def test_restated_figure_is_flagged_not_called_a_change(self):
+        current = memory.figures_from_note(NOTE)["MSFT"]
+        stale = {k: {**v, "value": v["value"] + 1.0} for k, v in current.items()}
+        previous = {"note_id": 1, "title": "t", "published_at": "2026-10-25", "figures": stale}
+        lines = memory.what_changed("MSFT", previous, current)
+        self.assertTrue(any("Restated since the last note" in l for l in lines), lines)
 
     def test_current_figures_round_trip_through_parser(self):
         f = build_figures(["MSFT"], [2024])

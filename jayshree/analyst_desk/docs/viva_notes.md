@@ -570,3 +570,76 @@ Result file: `data/evaluation/results/memory_compare_20261025-112601.json`. You 
 - *"Can the agent change its own memory?"* No. No tool writes memory. Only two code paths do: the analyst's "Add preference", and publish-after-approval.
 - *"What if a stored preference is wrong?"* Delete it in the panel. Each run's activity log shows which preferences were used.
 - *"How do you stop memory from leaking private data?"* Memory holds only the analyst's own preferences and published, verified figures. The private watchlist (L15) gets its own namespace that never reaches a prompt or search tool; that's in the security phase.
+
+---
+
+## 9. C2: the team of agents, hooks and the compliance critic (L11, L14)
+
+**Code:** [analystdesk/agent/team.py](../analystdesk/agent/team.py), [hooks.py](../analystdesk/agent/hooks.py). The nodes shared with C1 are in [graph.py](../analystdesk/agent/graph.py) (`common_nodes`). In the app, pick **C2 · team** next to the request box.
+
+```
+input_guard → plan → [analyst: plan gate] → fan-out in parallel (LangGraph Send):
+   researcher[each company]  MD&A drivers        tools: search_filings, get_passage
+   quant                     facts + sandbox     tools: get_financials, get_fact, run_python
+   risk_diff[each company]   Item 1A, Y vs Y-1   tools: search_filings, get_passage, get_past_notes
+ → typed HandoffMessage from each → gather ─(NOT_IN_COVERAGE)→ replan
+ → writer → compliance critic (code checks + judge) ─(issues, max 2)→ writer
+ → [analyst: note gate] → publish (only the publisher holds publish_note)
+```
+
+### 9.1 What each L11 requirement maps to
+
+| Requirement | Where |
+|---|---|
+| A supervisor + 3 or more specialists | Research lead (plan, fan-out, gather) + researcher, quant, risk_diff, critic, writer, publisher |
+| Each with its own tools | `servers.AGENT_TOOLS`; each specialist is bound to only its own tools, and the hooks re-check every call |
+| A typed hand-off message | `HandoffMessage` (pydantic): agent, company, findings, passage_ids, fact_ids, confidence, tool_calls, errors, round |
+| Parallel researchers (the brief's signature challenge B) | `Send` fan-out: one researcher and one risk-diff per company, plus the quant, all running concurrently |
+| Critic loop of at most 2 rounds | `check` → `count_revision` → `write`, with `MAX_REVISIONS = 2` |
+| Single-agent baseline with the same tools and budget | C1 (`graph.py`): same model, same MCP tools, same checker; only the orchestration differs |
+
+**The hand-off's ids are extracted by code** from the tool results, not claimed by the model. A specialist can't say it read a passage it never fetched. Confidence is also set by code: low if no evidence was gathered, medium if a tool errored.
+
+### 9.2 Hooks (L14)
+
+Every tool call in C2, and in C1 via `ToolNode(awrap_tool_call=...)`, passes through:
+- **Pre-tool:**
+  - *permission*: is the tool in this agent's allow-list? If not, `PERMISSION_DENIED`;
+  - *budget*: each agent instance has its own tool-call budget (researcher 6, quant 14, risk_diff 6). When it's used up, `BUDGET_EXCEEDED`;
+  - *EDGAR rate limit*: at most 10 calls per second.
+- **Post-tool:** a trace event (agent, tool, arguments, ok or error code, duration), streamed live to the app's activity log.
+
+Denials go back to the agent as normal tool results, so it adapts instead of crashing. In the live C2 run you can see `risk_diff[JPM]` hitting `BUDGET_EXCEEDED` and still handing off what it had.
+
+**Likely question:** *"Why hooks if each agent is only given its own tools anyway?"* Defence in depth. Binding decides what the model *sees*; the hook decides what *runs*. A bug, a mis-wired agent, or a prompt injection that names a tool the agent shouldn't have is stopped at the hook.
+
+### 9.3 The compliance critic
+
+1. **Code checks every number** (`checks.py`):
+   - facts match XBRL;
+   - `calc`, `growth` and `diff` values are recomputed;
+   - quoted numbers must appear in the cited passage **with the same unit** (a bare "5" no longer counts as a quote of "5%");
+   - no advice wording.
+2. **A judge from a different model family** (`meta-llama/llama-3.3-70b-instruct`, while the writer is `gpt-4.1-mini`) checks each cited claim against its passage text. Unsupported claims become issues for the writer.
+3. **Issues go back to the writer** for up to 2 revisions. Whatever remains is shown to the analyst at the gate; nothing is hidden.
+
+**Why a different family for the judge?** A model judging its own family's output tends to share its blind spots. The brief asks for this, and also for checking the judge against 20+ human labels with Cohen's kappa (Phase 8). Until then, the judge's verdicts are advisory: they're shown and sent back, but never silently trusted.
+
+### 9.4 Fixes found by tracing real runs (good viva stories)
+
+- **An invented figure caught.** In the first C2 run the writer wrote "$15.3 billion", which appeared in no cited passage and in nothing the quant returned. The critic flagged it, and it reached the gate as the only unverified number (34/35).
+- **A loose quote check, tightened.** "margin declined 5%" had passed because the digit 5 appeared somewhere in the passage. Quotes now must match number *and* unit.
+- **Changes now come from code too.** Writers kept inventing growth rates and margin moves. New code-computed placeholders were added:
+  - `{T_Y_revenue_growth}`, rendered with `[growth: A / B]`;
+  - `{T_Y_margin_change}`, rendered with `[diff: …]` in percentage points.
+
+  The checker recomputes both, and flags any "pp" number without a source.
+- **Result in the next C2 run** (JPM vs GS): 18/18 numbers verified; the judge supported 3 of 4 claims, and the 4th went to the analyst.
+
+### 9.5 Memory became automatic (from your design question)
+
+- **The memory checkbox is gone.** Memory is per analyst (by name) and on by default.
+- **Evaluation runs force memory off** (`AGENT_EVAL=1`), so experiments stay reproducible and held-out cases never benefit from memory.
+- **Restated figures are detected by code.** If the same fiscal year now has a different value, the note says "restated since the last note" instead of calling it a change.
+- **A missing previous note is stated plainly.** If the analyst asks "what changed since our last note" and there isn't one, the note says so.
+- **"↻ Re-run this request without memory"** covers independent views, second opinions and debugging, in one click.
