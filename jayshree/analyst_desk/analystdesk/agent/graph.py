@@ -86,6 +86,28 @@ def _event(node: str, **info) -> list[dict]:
     return [{"node": node, **info}]
 
 
+def tool_json(raw) -> dict:
+    """The structured result of an MCP tool call as a dict.
+
+    The adapter returns content blocks: [{"type": "text", "text": "<json>"}]
+    (or that list as a JSON string); the tool's own result is the inner JSON.
+    """
+    data = raw
+    for _ in range(3):
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except ValueError:
+                return {}
+        elif isinstance(data, list) and data and isinstance(data[0], dict) and "text" in data[0]:
+            data = data[0]["text"]
+        elif isinstance(data, dict):
+            return data
+        else:
+            return {}
+    return data if isinstance(data, dict) else {}
+
+
 # ── prompts (L3: role, context, task, constraints, format, examples) ─────────
 
 PLANNER = """ROLE: You are the research lead of an equity research desk.
@@ -293,11 +315,12 @@ def build_graph(llm, tools: list, publish_tool, passage_text=None):
     async def publish(state: AgentState):
         d = state["draft"]
         raw = await publish_tool.ainvoke({**d, "approval_token": state["published"]["approval_token"]})
-        text = raw if isinstance(raw, str) else json.dumps(raw)
-        ok = '"ok":true' in text.replace(" ", "") or '"ok": true' in text
+        result = tool_json(raw)
+        ok = result.get("ok") is True
         return {"outcome": "published" if ok else "publish_failed",
-                "published": {"result": text[:500]},
-                "trace": _event("publish", ok=ok)}
+                "published": {"result": json.dumps(result)[:500], "note_id": result.get("note_id")},
+                "trace": _event("publish", ok=ok, note_id=result.get("note_id"),
+                                error=(result.get("error") or {}).get("message"))}
 
     g = StateGraph(AgentState)
     g.add_node("input_guard", input_guard)

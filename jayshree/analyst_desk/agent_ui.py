@@ -75,8 +75,13 @@ def _event_line(ev: dict) -> str:
     if n == "review_note":
         return f"👤 **Note {ev['action']}{'d' if ev['action'] != 'edit' else 'ed'}** by the analyst"
     if n == "publish":
-        return "📤 **Published** to the research portal" if ev["ok"] else "❌ **Publish refused** by the portal"
+        if ev["ok"]:
+            return f"📤 **Published** to the research portal" + (f" as note #{ev['note_id']}" if ev.get("note_id") else "")
+        return "❌ **Publish refused** by the portal" + (f": {ev['error']}" if ev.get("error") else "")
+    if n == "status_corrected":
+        return f"🛠 **Status corrected** to published (note #{ev.get('note_id')}): {ev.get('reason', '')}"
     return f"· {n}"
+
 
 
 def _note_display(body: str) -> str:
@@ -206,7 +211,12 @@ def build_agent_tab():
             run_id = gr.Textbox(label="Run id (paste one to resume)", scale=2)
             load_btn = gr.Button("⟳ Load run", scale=1)
             approver = gr.Textbox(label="Your name (recorded on approvals)", value="analyst", scale=2)
-        status = gr.Markdown("### Enter a request and press Start")
+        with gr.Accordion("📂 Your runs: click a row to load it", open=True):
+            runs_table = gr.Dataframe(
+                headers=["run id", "updated (UTC)", "status", "numbers verified", "tool calls", "request"],
+                interactive=False, wrap=True, max_height=260)
+            refresh_runs_btn = gr.Button("↻ Refresh list", size="sm")
+        status = gr.Markdown("### Enter a request and press Start, or pick a run above")
 
         with gr.Group(visible=False) as plan_box:
             gr.Markdown("## 📝 Plan — your approval is needed")
@@ -298,11 +308,27 @@ def build_agent_tab():
             result = await get_run(rid)
             return _view(rid, result, _log_from_trace(result["values"]))
 
-        start_btn.click(on_start, [request], outputs)
-        request.submit(on_start, [request], outputs)
-        approve_plan_btn.click(on_approve_plan, [run_id], outputs)
-        edit_plan_btn.click(on_edit_plan, [run_id, plan_json], outputs)
-        approve_note_btn.click(on_approve_note, [run_id, approver], outputs)
-        edit_note_btn.click(on_edit_note, [run_id, note_body], outputs)
-        reject_btn.click(on_reject, [run_id, reject_reason], outputs)
-        load_btn.click(on_load, [run_id], outputs)
+        async def refresh_runs():
+            from analystdesk.agent.runtime import list_runs
+            return [[r["run_id"], r["updated"], r["status"], r["check"], r["tool_calls"], r["request"]]
+                    for r in await list_runs()]
+
+        async def on_pick_run(table, evt: gr.SelectData):
+            row = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+            rid = table.iloc[row, 0] if hasattr(table, "iloc") else table[row][0]
+            return await on_load(str(rid))
+
+        # every action refreshes the runs list afterwards
+        for trigger, fn, inputs in (
+                (start_btn.click, on_start, [request]),
+                (request.submit, on_start, [request]),
+                (approve_plan_btn.click, on_approve_plan, [run_id]),
+                (edit_plan_btn.click, on_edit_plan, [run_id, plan_json]),
+                (approve_note_btn.click, on_approve_note, [run_id, approver]),
+                (edit_note_btn.click, on_edit_note, [run_id, note_body]),
+                (reject_btn.click, on_reject, [run_id, reject_reason]),
+                (load_btn.click, on_load, [run_id])):
+            trigger(fn, inputs, outputs).then(refresh_runs, None, runs_table)
+        runs_table.select(on_pick_run, [runs_table], outputs)
+        refresh_runs_btn.click(refresh_runs, None, runs_table)
+        return refresh_runs, runs_table

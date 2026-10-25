@@ -422,7 +422,8 @@ with gr.Blocks(title="Analyst Desk") as demo:
 
     # ── Tab: Research Agent (C1, with plan and note gates) ────────────────────
     from agent_ui import build_agent_tab
-    build_agent_tab()
+    refresh_runs, runs_table = build_agent_tab()
+    demo.load(fn=refresh_runs, outputs=runs_table)
 
     # ── Tab 3: Data Explorer ──────────────────────────────────────────────────
     with gr.Tab("🔍 Data Explorer"):

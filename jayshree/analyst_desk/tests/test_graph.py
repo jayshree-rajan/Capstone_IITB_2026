@@ -17,5 +17,16 @@ class GraphShapeTests(unittest.TestCase):
         self.assertIn(("review_note", "check"), edges)    # edited note is re-checked
 
 
+
+class ToolJsonTests(unittest.TestCase):
+    def test_parses_adapter_content_blocks(self):
+        from analystdesk.agent.graph import tool_json
+        inner = '{"ok":true,"note_id":1}'
+        self.assertEqual(tool_json([{"type": "text", "text": inner}])["note_id"], 1)
+        self.assertEqual(tool_json('[{"type": "text", "text": "{\\"ok\\":true,\\"note_id\\":2}"}]')["note_id"], 2)
+        self.assertEqual(tool_json('{"ok": false}'), {"ok": False})
+        self.assertEqual(tool_json("not json"), {})
+
+
 if __name__ == "__main__":
     unittest.main()

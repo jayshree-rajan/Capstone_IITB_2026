@@ -118,6 +118,50 @@ async def get_run(run_id: str) -> dict:
         return await _snapshot(graph, {"configurable": {"thread_id": run_id}})
 
 
+def _status(snapshot: dict) -> str:
+    v = snapshot["values"]
+    if snapshot["interrupts"]:
+        return "⏸ waiting: plan approval" if snapshot["interrupts"][0]["gate"] == "plan" \
+            else "⏸ waiting: note approval"
+    if v.get("guard") and not v["guard"].get("ok"):
+        return "⛔ out of scope"
+    return {"published": "✅ published", "rejected": "🛑 rejected",
+            "publish_failed": "❌ publish refused"}.get(v.get("outcome"), "⏳ in progress / stopped")
+
+
+async def list_runs(limit: int = 50) -> list[dict]:
+    """Every saved run, newest first: id, when, request, status, tools, check."""
+    import sqlite3
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    from .graph import build_graph
+    if not CHECKPOINTS.exists():
+        return []
+    con = sqlite3.connect(f"file:{CHECKPOINTS}?mode=ro", uri=True)
+    try:
+        ids = [r[0] for r in con.execute(
+            "SELECT thread_id FROM checkpoints GROUP BY thread_id "
+            "ORDER BY MAX(checkpoint_id) DESC LIMIT ?", (limit,))]
+    finally:
+        con.close()
+    runs = []
+    async with AsyncSqliteSaver.from_conn_string(str(CHECKPOINTS)) as saver:
+        graph = build_graph(_NoModel(), [], None).compile(checkpointer=saver)
+        for rid in ids:
+            config = {"configurable": {"thread_id": rid}}
+            snap = await graph.aget_state(config)
+            s = {"values": snap.values, "interrupts": [i.value for t in snap.tasks for i in t.interrupts]}
+            check = snap.values.get("check") or {}
+            runs.append({
+                "run_id": rid,
+                "updated": (snap.created_at or "")[:16].replace("T", " "),
+                "request": snap.values.get("request", ""),
+                "status": _status(s),
+                "tool_calls": snap.values.get("tool_calls", 0),
+                "check": f"{check['verified']}/{check['total']}" if check else "",
+            })
+    return runs
+
+
 async def _snapshot(graph, config) -> dict:
     snap = await graph.aget_state(config)
     return {"values": snap.values, "interrupts": [i.value for t in snap.tasks for i in t.interrupts],
