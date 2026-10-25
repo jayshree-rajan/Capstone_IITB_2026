@@ -446,3 +446,54 @@ So the two layers are independent. The guard catches attacks early, with clear B
 **Likely questions:**
 - *"Why not mount the Docker socket so the sandbox server can start a fresh container per call?"* Access to the socket is effectively root on the host. A bug or injection in the sandbox server would then control the whole machine. A single locked-down container with a guarded child process is safer.
 - *"What still needs adding for the full L16 bar?"* Prometheus, Grafana and an alert (Phase 8), the agent graph (Phases 4–6), CI with an evaluation gate, and a test install on a clean machine.
+
+---
+
+## 7. The C1 agent: one agent, all tools (L8, L10)
+
+**Code:** [analystdesk/agent/graph.py](../analystdesk/agent/graph.py), [checks.py](../analystdesk/agent/checks.py), [figures.py](../analystdesk/agent/figures.py), and the command-line runner [__main__.py](../analystdesk/agent/__main__.py). Diagram: `python -m analystdesk.agent graph` prints it (Mermaid).
+
+```
+input_guard → plan → [analyst: approve/edit plan] → research ⇄ tools (ReAct)
+   tools ─(NOT_IN_COVERAGE)→ replan → plan → [analyst sees revised plan]
+→ write → check ─(issues, max 2)→ write
+→ [analyst: approve / edit / reject exact note] ─edit→ check
+→ publish (signed approval; portal verifies) → END
+```
+
+**How each minimum-bar item is met:**
+
+| L8/L10 requirement | Where |
+|---|---|
+| Typed state | `AgentState` (TypedDict), `Plan` and `Draft` (pydantic) |
+| Conditional edges | after_guard, after_research, after_tools, after_check, after_review |
+| A self-correction loop | `check` sends code-found issues back to `write`, at most 2 times |
+| Persistent checkpointer, stop and resume | `AsyncSqliteSaver` at `data/runs/checkpoints.sqlite`. Each CLI command exits at a gate, and the next resumes from a **new process** |
+| A plan object shown to the user | `review_plan` interrupt. The analyst approves or edits it (`--edit-plan plan.json`) |
+| Replanning when a tool contradicts the plan | A NOT_IN_COVERAGE tool result triggers `replan`, and the analyst sees the revised plan |
+| ReAct inside the specialist | `research`: the model calls tools, observes, and repeats, within a budget of 24 tool calls and 120k tokens |
+| Human approval of the exact payload (L14) | `review_note` signs the exact note. An edit goes back through `check`, then needs a fresh approval |
+
+**Live run evidence (gpt-4.1-mini via OpenRouter):**
+- `demo1` / `demo2` (first design): the plan gate worked; the run was stopped and resumed from a new process; 14–18 real tool calls (XBRL facts, 6 sandbox calculations, filing searches); the checker **rejected the draft 3 times**. The numbers were right, but the writer kept putting citations in the wrong place, so 0 of 37 verified.
+- `demo3` (placeholder design): **14 of 14 numbers verified on the first draft**, 14 tool calls, about 28k tokens. It is waiting at the note gate for your approval: `python -m analystdesk.agent resume demo3 --approve --approver Jayshree`.
+
+**The key design lesson (tell this in the viva).**
+- Asking the LLM to *type* each number and place its citation correctly failed even with explicit wrong/right examples.
+- The fix applies rule 1 literally: **the model never types a key figure.** Code builds a table of figures from XBRL, each with a key such as `{MSFT_2024_margin}`. The writer chooses *which* figure to mention by writing its placeholder, and code inserts the exact value plus its `[fact: …]` or `[calc: …]` source.
+- Any other number must be quoted from a filing, and code checks that it really occurs in the passage cited on the same line.
+- Result: numbers can't be mistyped or invented, and the verified share went from 0% to 100%.
+
+**What the checker verifies (all in code):**
+- Fact values match XBRL.
+- Margins equal numerator ÷ denominator.
+- Quoted numbers appear in the cited passage.
+- Cited passages exist.
+- No advice wording.
+
+That verified share is the dashboard metric for the "alert below 98%" (Phase 8).
+
+**Likely questions:**
+- *"Where is the model deciding and where is code?"* The model plans, chooses tools and writes the prose. Code checks scope, enforces coverage on the plan, computes and inserts every key figure, verifies every number, and signs approvals. People approve the plan and the note.
+- *"What happens if the check still fails after 2 revisions?"* The note goes to the analyst **with the issues listed**. Nothing is hidden, and the analyst can edit or reject.
+- *"How does resume work?"* Every step's state is saved under the run's `thread_id` in SQLite. `Command(resume=decision)` continues from the exact interrupt, even in a different process.
